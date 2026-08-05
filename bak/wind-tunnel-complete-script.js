@@ -1,0 +1,1280 @@
+
+'use strict';
+/* ============================== constants ============================== */
+let W = 512, H = 256;            // lattice (mutable — see setResolution)
+let SUBv = 10;                   // LBM steps per frame, scaled with resolution
+let FLOORR = 10;                 // ground plane thickness (cells), scaled with H
+const TAU0 = 0.53;               // base relaxation time
+const FORCE_EVERY = 6;           // frames between force readbacks
+
+const RES = {
+  low:      { w: 384,  h: 192, label: 'Low' },
+  standard: { w: 512,  h: 256, label: 'Standard' },
+  high:     { w: 768,  h: 384, label: 'High' },
+  ultra:    { w: 1024, h: 512, label: 'Ultra' },
+};
+
+/* D2Q9 for GLSL injection */
+const GLSL_COMMON = `
+const ivec2 E[9] = ivec2[9](
+  ivec2(0,0), ivec2(1,0), ivec2(0,1), ivec2(-1,0), ivec2(0,-1),
+  ivec2(1,1), ivec2(-1,1), ivec2(-1,-1), ivec2(1,-1));
+const float WT[9] = float[9](
+  4.0/9.0, 1.0/9.0, 1.0/9.0, 1.0/9.0, 1.0/9.0,
+  1.0/36.0, 1.0/36.0, 1.0/36.0, 1.0/36.0);
+const int OPP[9] = int[9](0,3,4,1,2,7,8,5,6);
+float feq(int i, float rho, vec2 u){
+  vec2 ei = vec2(E[i]);
+  float eu = dot(ei, u);
+  return WT[i]*rho*(1.0 + 3.0*eu + 4.5*eu*eu - 1.5*dot(u,u));
+}`;
+
+/* ============================== state ============================== */
+const COARSE = matchMedia('(pointer: coarse)').matches;
+const HANDLE_R = COARSE ? 14 : 6;        // drawn size
+const HIT_R = COARSE ? 30 : 12;          // hit radius, css px
+const state = {
+  tool: 'select',
+  shapes: [],
+  sel: -1,
+  floor: false,
+  mode: 0,
+  paused: false,
+  U: 0.0875,
+  brush: 5,
+  frontalH: 0,
+  com: null,
+  cd: null, cl: null,
+  metersOk: true,
+  nextId: 1,
+};
+
+/* ============================== DOM ============================== */
+const $ = id => document.getElementById(id);
+const stage = $('stage');
+const glCanvas = $('glCanvas');
+const uiCanvas = $('uiCanvas');
+const uiCtx = uiCanvas.getContext('2d');
+
+/* ============================== WebGL setup ============================== */
+const gl = glCanvas.getContext('webgl2', { antialias:false, alpha:false, depth:false, stencil:false });
+let glOk = !!gl && !!gl.getExtension('EXT_color_buffer_float');
+if (glOk) gl.getExtension('OES_texture_float_linear');
+if (!glOk) { $('glError').style.display = 'grid'; }
+
+function compile(type, src){
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+    throw new Error(gl.getShaderInfoLog(s) + '\n' + src);
+  return s;
+}
+function program(fsSrc){
+  const vs = compile(gl.VERTEX_SHADER, `#version 300 es
+    void main(){
+      vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+      gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+    }`);
+  const fs = compile(gl.FRAGMENT_SHADER, fsSrc);
+  const p = gl.createProgram();
+  gl.attachShader(p, vs); gl.attachShader(p, fs); gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS))
+    throw new Error(gl.getProgramInfoLog(p));
+  p.u = {};
+  const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++){
+    const info = gl.getActiveUniform(p, i);
+    p.u[info.name] = gl.getUniformLocation(p, info.name);
+  }
+  return p;
+}
+function tex2d(w, h, internal, format, type, filter){
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0, format, type, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
+}
+
+/* ---------------- shader sources ---------------- */
+const initFS = `#version 300 es
+precision highp float;
+uniform float uU;
+${GLSL_COMMON}
+layout(location=0) out vec4 o0;
+layout(location=1) out vec4 o1;
+layout(location=2) out vec4 o2;
+void main(){
+  vec2 u = vec2(-uU, 0.0);
+  o0 = vec4(feq(0,1.0,u), feq(1,1.0,u), feq(2,1.0,u), feq(3,1.0,u));
+  o1 = vec4(feq(4,1.0,u), feq(5,1.0,u), feq(6,1.0,u), feq(7,1.0,u));
+  o2 = vec4(feq(8,1.0,u), 1.0, u);
+}`;
+
+const stepFS = `#version 300 es
+precision highp float;
+uniform sampler2D uF0, uF1, uF2, uObs;
+uniform vec2 uRes;
+uniform float uU, uTau;
+${GLSL_COMMON}
+layout(location=0) out vec4 o0;
+layout(location=1) out vec4 o1;
+layout(location=2) out vec4 o2;
+float getf(ivec2 p, int i){
+  if (i == 8) return texelFetch(uF2, p, 0).x;
+  if (i < 4)  return texelFetch(uF0, p, 0)[i];
+  return texelFetch(uF1, p, 0)[i-4];
+}
+void writeEq(float rho, vec2 u, out vec4 a, out vec4 b, out vec4 c){
+  a = vec4(feq(0,rho,u), feq(1,rho,u), feq(2,rho,u), feq(3,rho,u));
+  b = vec4(feq(4,rho,u), feq(5,rho,u), feq(6,rho,u), feq(7,rho,u));
+  c = vec4(feq(8,rho,u), rho, u);
+}
+void main(){
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  ivec2 R = ivec2(uRes);
+  if (texelFetch(uObs, p, 0).r > 0.5){ writeEq(1.0, vec2(0.0), o0, o1, o2); return; }
+  vec2 uin = vec2(-uU, 0.0);
+  if (p.x == R.x - 1 || p.y == 0 || p.y == R.y - 1){ writeEq(1.0, uin, o0, o1, o2); return; }
+  if (p.x == 0){
+    ivec2 q = ivec2(1, p.y);
+    o0 = texelFetch(uF0, q, 0);
+    o1 = texelFetch(uF1, q, 0);
+    o2 = texelFetch(uF2, q, 0);
+    return;
+  }
+  float f[9];
+  for (int i = 0; i < 9; i++){
+    ivec2 src = p - E[i];
+    if (texelFetch(uObs, src, 0).r > 0.5) f[i] = getf(p, OPP[i]);   // halfway bounce-back
+    else                                  f[i] = getf(src, i);      // pull streaming
+  }
+  float rho = 0.0; vec2 u = vec2(0.0);
+  for (int i = 0; i < 9; i++){ rho += f[i]; u += f[i] * vec2(E[i]); }
+  rho = max(rho, 1e-4);
+  u /= rho;
+  float sp = length(u);
+  if (sp > 0.25) u *= 0.25 / sp;
+  float fe[9];
+  for (int i = 0; i < 9; i++) fe[i] = feq(i, rho, u);
+  // Smagorinsky sub-grid model from non-equilibrium stress
+  float Pxx = 0.0, Pyy = 0.0, Pxy = 0.0;
+  for (int i = 0; i < 9; i++){
+    float fn = f[i] - fe[i];
+    vec2 ei = vec2(E[i]);
+    Pxx += ei.x*ei.x*fn; Pyy += ei.y*ei.y*fn; Pxy += ei.x*ei.y*fn;
+  }
+  float Q = sqrt(Pxx*Pxx + Pyy*Pyy + 2.0*Pxy*Pxy);
+  float tau = 0.5 * (uTau + sqrt(uTau*uTau + 0.76 * Q / rho));
+  float om = 1.0 / tau;
+  for (int i = 0; i < 9; i++) f[i] -= om * (f[i] - fe[i]);
+  o0 = vec4(f[0], f[1], f[2], f[3]);
+  o1 = vec4(f[4], f[5], f[6], f[7]);
+  o2 = vec4(f[8], rho, u);
+}`;
+
+const dyeFS = `#version 300 es
+precision highp float;
+uniform sampler2D uDye, uF2, uObs;
+uniform vec2 uRes;
+uniform float uDt;
+uniform int uStripe;
+out vec4 o;
+void main(){
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  if (texelFetch(uObs, p, 0).r > 0.5){ o = vec4(0.0); return; }
+  vec2 vel = texelFetch(uF2, p, 0).zw;
+  vec2 pos = (vec2(p) + 0.5 - vel * uDt) / uRes;
+  float d = texture(uDye, pos).r * 0.998;
+  if (p.x >= int(uRes.x) - 3 && (p.y % uStripe) < max(uStripe / 6, 2)) d = 1.0;
+  o = vec4(d, 0.0, 0.0, 1.0);
+}`;
+
+const forceFS = `#version 300 es
+precision highp float;
+uniform sampler2D uF0, uF1, uF2, uObs;
+uniform vec2 uRes;
+uniform float uFloorY;
+${GLSL_COMMON}
+out vec4 o;
+float getf(ivec2 p, int i){
+  if (i == 8) return texelFetch(uF2, p, 0).x;
+  if (i < 4)  return texelFetch(uF0, p, 0)[i];
+  return texelFetch(uF1, p, 0)[i-4];
+}
+void main(){
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  ivec2 R = ivec2(uRes);
+  if (p.x < 1 || p.x > R.x - 2 || p.y < 1 || p.y > R.y - 2 ||
+      texelFetch(uObs, p, 0).r > 0.5){ o = vec4(0.0); return; }
+  vec2 F = vec2(0.0);
+  for (int i = 1; i < 9; i++){
+    ivec2 n = p + E[i];
+    if (float(n.y) < uFloorY) continue;               // exclude ground plane
+    if (texelFetch(uObs, n, 0).r > 0.5)
+      F += 2.0 * getf(p, i) * vec2(E[i]);             // momentum exchange
+  }
+  o = vec4(F, 0.0, 0.0);
+}`;
+
+const reduceFS = `#version 300 es
+precision highp float;
+uniform sampler2D uSrc;
+uniform ivec2 uSrcSize;
+out vec4 o;
+void main(){
+  ivec2 q = ivec2(gl_FragCoord.xy) * 2;
+  vec4 s = vec4(0.0);
+  for (int dy = 0; dy < 2; dy++)
+  for (int dx = 0; dx < 2; dx++){
+    ivec2 c = q + ivec2(dx, dy);
+    if (c.x < uSrcSize.x && c.y < uSrcSize.y) s += texelFetch(uSrc, c, 0);
+  }
+  o = s;
+}`;
+
+const displayFS = `#version 300 es
+precision highp float;
+uniform sampler2D uF2, uDye, uObs;
+uniform vec2 uRes, uView;
+uniform int uMode;
+uniform float uU, uFloorY;
+out vec4 fc;
+vec2 velAt(ivec2 p){
+  p = clamp(p, ivec2(0), ivec2(uRes) - 1);
+  return texelFetch(uF2, p, 0).zw;
+}
+vec3 speedmap(float t){
+  vec3 c0 = vec3(0.03, 0.05, 0.10);
+  vec3 c1 = vec3(0.10, 0.30, 0.72);
+  vec3 c2 = vec3(0.18, 0.78, 0.84);
+  vec3 c3 = vec3(1.00, 0.72, 0.28);
+  vec3 c4 = vec3(1.00, 0.98, 0.92);
+  if (t < 0.25) return mix(c0, c1, t / 0.25);
+  if (t < 0.55) return mix(c1, c2, (t - 0.25) / 0.30);
+  if (t < 0.85) return mix(c2, c3, (t - 0.55) / 0.30);
+  return mix(c3, c4, (t - 0.85) / 0.15);
+}
+void main(){
+  vec2 uv = gl_FragCoord.xy / uView;
+  ivec2 p = ivec2(uv * uRes);
+  ivec2 R = ivec2(uRes);
+  float solid = texelFetch(uObs, p, 0).r;
+  vec3 col;
+  if (solid > 0.5){
+    bool edge = false;
+    ivec2 D[4] = ivec2[4](ivec2(1,0), ivec2(-1,0), ivec2(0,1), ivec2(0,-1));
+    for (int i = 0; i < 4; i++){
+      ivec2 n = clamp(p + D[i], ivec2(0), R - 1);
+      if (texelFetch(uObs, n, 0).r < 0.5) edge = true;
+    }
+    bool isFloor = float(p.y) < uFloorY;
+    col = isFloor ? vec3(0.13, 0.14, 0.17) : vec3(0.24, 0.26, 0.32);
+    if (edge) col = vec3(1.0, 0.71, 0.33);
+  } else if (uMode == 0){
+    float d = texture(uDye, uv).r;
+
+    //vec3 bg = vec3(0.031, 0.039, 0.059);
+    //vec3 smoke = mix( vec3(0.82, 0.86, 0.90),  vec3(1.0),  clamp(d * 1.15 - 0.20, 0.0, 1.0) );
+    // col = bg + smoke * d * 1.15;	  
+    vec3 smoke = vec3(1.0);
+    col = bg + smoke * d * 1.20;
+	  
+  } else if (uMode == 1){
+    float t = clamp(length(velAt(p)) / (uU * 1.6 + 1e-5), 0.0, 1.0);
+    col = speedmap(t);
+  } else {
+    float c = (velAt(p + ivec2(1,0)).y - velAt(p - ivec2(1,0)).y
+             - velAt(p + ivec2(0,1)).x + velAt(p - ivec2(0,1)).x) * 0.5;
+    float t = clamp(c / (uU * 0.9 + 1e-5), -1.0, 1.0);
+    col = vec3(0.045, 0.055, 0.085)
+        + max( t, 0.0) * vec3(1.00, 0.52, 0.14)
+        + max(-t, 0.0) * vec3(0.14, 0.60, 1.00);
+  }
+  fc = vec4(col, 1.0);
+}`;
+
+/* ---------------- GL resources ---------------- */
+let progInit, progStep, progDye, progForce, progReduce, progDisplay;
+let vao, fTex = [], fFbo = [], dyeTex = [], dyeFbo = [], obsTex;
+let chain = []; // [{tex, fbo, w, h}]
+let cur = 0, dyeCur = 0;
+
+function buildPrograms(){
+  progInit    = program(initFS);
+  progStep    = program(stepFS);
+  progDye     = program(dyeFS);
+  progForce   = program(forceFS);
+  progReduce  = program(reduceFS);
+  progDisplay = program(displayFS);
+  vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+}
+
+function destroySim(){
+  for (const set of fTex) for (const t of set) gl.deleteTexture(t);
+  for (const f of fFbo) gl.deleteFramebuffer(f);
+  for (const t of dyeTex) gl.deleteTexture(t);
+  for (const f of dyeFbo) gl.deleteFramebuffer(f);
+  for (const c of chain){ gl.deleteTexture(c.tex); gl.deleteFramebuffer(c.fbo); }
+  if (obsTex) gl.deleteTexture(obsTex);
+  fTex = []; fFbo = []; dyeTex = []; dyeFbo = []; chain = []; obsTex = null;
+  cur = 0; dyeCur = 0;
+}
+
+function allocSim(){
+  for (let s = 0; s < 2; s++){
+    const set = [
+      tex2d(W, H, gl.RGBA32F, gl.RGBA, gl.FLOAT, gl.NEAREST),
+      tex2d(W, H, gl.RGBA32F, gl.RGBA, gl.FLOAT, gl.NEAREST),
+      tex2d(W, H, gl.RGBA32F, gl.RGBA, gl.FLOAT, gl.NEAREST),
+    ];
+    const fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    for (let i = 0; i < 3; i++)
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0 + i, gl.TEXTURE_2D, set[i], 0);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2]);
+    fTex.push(set); fFbo.push(fbo);
+  }
+
+  for (let s = 0; s < 2; s++){
+    const t = tex2d(W, H, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR);
+    const fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+    dyeTex.push(t); dyeFbo.push(fbo);
+  }
+
+  obsTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, obsTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, W, H, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+  // reduction chain: level 0 holds the force field
+  let w = W, h = H;
+  while (true){
+    const t = tex2d(w, h, gl.RGBA32F, gl.RGBA, gl.FLOAT, gl.NEAREST);
+    const fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+    chain.push({ tex:t, fbo, w, h });
+    if (w === 1 && h === 1) break;
+    w = Math.max(1, Math.ceil(w / 2));
+    h = Math.max(1, Math.ceil(h / 2));
+  }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+
+function bindTex(unit, tex){ gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, tex); }
+
+/* Rebuild the simulation at a new lattice size. Shapes, ink, and the floor
+   scale with it; the flow field restarts from freestream. */
+function setResolution(key){
+  const r = RES[key];
+  if (!r) return;
+  if (r.w !== W){
+    const fx = r.w / W;
+    for (const sh of state.shapes){ sh.x *= fx; sh.y *= fx; sh.s *= fx; }
+    // rescale freehand ink
+    const tmp = document.createElement('canvas');
+    tmp.width = W; tmp.height = H;
+    tmp.getContext('2d').drawImage(paintCanvas, 0, 0);
+    W = r.w; H = r.h;
+    paintCanvas.width = W; paintCanvas.height = H;
+    paintCtx.imageSmoothingEnabled = false;
+    paintCtx.drawImage(tmp, 0, 0, W, H);
+    obsCanvas.width = W; obsCanvas.height = H;
+    destroySim();
+    allocSim();
+  }
+  FLOORR = Math.max(6, Math.round(H * 0.04));
+  SUBv = Math.round(10 * W / 512);
+  rasterizeObstacles();
+  obsDirty = false;
+  initFluid();
+  const lbl = document.getElementById('latticeLabel');
+  if (lbl) lbl.textContent = `${W}×${H} lattice`;
+}
+
+/* One-shot startup benchmark at the standard lattice: time a burst of LBM
+   steps, project the per-frame cost of each preset, pick the largest that
+   fits a ~9 ms sim budget. Manual selection overrides. */
+function benchmarkPick(){
+  const N = 40;
+  gl.finish();
+  const t0 = performance.now();
+  const savedSub = SUBv;
+  SUBv = N;
+  stepFluid();
+  SUBv = savedSub;
+  gl.finish();
+  const perStep = (performance.now() - t0) / N;   // ms per step at current W×H
+  const baseArea = W * H;
+  let pick = 'low';
+  for (const key of ['standard', 'high', 'ultra']){
+    const r = RES[key];
+    const cost = perStep * (r.w * r.h / baseArea) * Math.round(10 * r.w / 512);
+    if (cost < 9) pick = key;
+  }
+  return pick;
+}
+
+function initFluid(){
+  gl.useProgram(progInit);
+  gl.viewport(0, 0, W, H);
+  for (let s = 0; s < 2; s++){
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fFbo[s]);
+    gl.uniform1f(progInit.u.uU, state.U);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+  for (let s = 0; s < 2; s++){
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dyeFbo[s]);
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+  }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  state.cd = null; state.cl = null;
+}
+
+function stepFluid(){
+  gl.useProgram(progStep);
+  gl.viewport(0, 0, W, H);
+  gl.uniform1f(progStep.u.uU, state.U);
+  gl.uniform1f(progStep.u.uTau, TAU0);
+  gl.uniform2f(progStep.u.uRes, W, H);
+  gl.uniform1i(progStep.u.uF0, 0);
+  gl.uniform1i(progStep.u.uF1, 1);
+  gl.uniform1i(progStep.u.uF2, 2);
+  gl.uniform1i(progStep.u.uObs, 3);
+  bindTex(3, obsTex);
+  for (let s = 0; s < SUBv; s++){
+    const src = cur, dst = 1 - cur;
+    bindTex(0, fTex[src][0]); bindTex(1, fTex[src][1]); bindTex(2, fTex[src][2]);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fFbo[dst]);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    cur = dst;
+  }
+}
+
+function stepDye(){
+  gl.useProgram(progDye);
+  gl.viewport(0, 0, W, H);
+  gl.uniform2f(progDye.u.uRes, W, H);
+  gl.uniform1f(progDye.u.uDt, SUBv);
+  gl.uniform1i(progDye.u.uStripe, Math.max(10, Math.round(H / 14)));
+  gl.uniform1i(progDye.u.uDye, 0);
+  gl.uniform1i(progDye.u.uF2, 1);
+  gl.uniform1i(progDye.u.uObs, 2);
+  bindTex(0, dyeTex[dyeCur]);
+  bindTex(1, fTex[cur][2]);
+  bindTex(2, obsTex);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, dyeFbo[1 - dyeCur]);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  dyeCur = 1 - dyeCur;
+}
+
+const forcePx = new Float32Array(4);
+function measureForces(){
+  gl.useProgram(progForce);
+  gl.viewport(0, 0, W, H);
+  gl.uniform2f(progForce.u.uRes, W, H);
+  gl.uniform1f(progForce.u.uFloorY, state.floor ? FLOORR : 0);
+  gl.uniform1i(progForce.u.uF0, 0);
+  gl.uniform1i(progForce.u.uF1, 1);
+  gl.uniform1i(progForce.u.uF2, 2);
+  gl.uniform1i(progForce.u.uObs, 3);
+  bindTex(0, fTex[cur][0]); bindTex(1, fTex[cur][1]); bindTex(2, fTex[cur][2]); bindTex(3, obsTex);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, chain[0].fbo);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  gl.useProgram(progReduce);
+  gl.uniform1i(progReduce.u.uSrc, 0);
+  for (let i = 1; i < chain.length; i++){
+    gl.uniform2i(progReduce.u.uSrcSize, chain[i-1].w, chain[i-1].h);
+    bindTex(0, chain[i-1].tex);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, chain[i].fbo);
+    gl.viewport(0, 0, chain[i].w, chain[i].h);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+  try {
+    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, forcePx);
+  } catch (e) { state.metersOk = false; return; }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+  const q = 0.5 * state.U * state.U * Math.max(state.frontalH, 1);
+  if (state.frontalH < 2 || state.U < 0.005 || q <= 0){ state.cd = null; state.cl = null; return; }
+  const cd = -forcePx[0] / q;   // flow is -x; drag acts in -x on the body
+  const cl =  forcePx[1] / q;
+  const a = 0.10;
+  state.cd = state.cd == null ? cd : state.cd + a * (cd - state.cd);
+  state.cl = state.cl == null ? cl : state.cl + a * (cl - state.cl);
+}
+
+function draw(){
+  const vw = glCanvas.width, vh = glCanvas.height;
+  gl.useProgram(progDisplay);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, vw, vh);
+  gl.uniform2f(progDisplay.u.uRes, W, H);
+  gl.uniform2f(progDisplay.u.uView, vw, vh);
+  gl.uniform1i(progDisplay.u.uMode, state.mode);
+  gl.uniform1f(progDisplay.u.uU, state.U);
+  gl.uniform1f(progDisplay.u.uFloorY, state.floor ? FLOORR : 0);
+  gl.uniform1i(progDisplay.u.uF2, 0);
+  gl.uniform1i(progDisplay.u.uDye, 1);
+  gl.uniform1i(progDisplay.u.uObs, 2);
+  bindTex(0, fTex[cur][2]); bindTex(1, dyeTex[dyeCur]); bindTex(2, obsTex);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+/* ============================== obstacle rasterization ============================== */
+const obsCanvas = document.createElement('canvas');
+obsCanvas.width = W; obsCanvas.height = H;
+const obsCtx = obsCanvas.getContext('2d', { willReadFrequently:true });
+
+const paintCanvas = document.createElement('canvas');
+paintCanvas.width = W; paintCanvas.height = H;
+const paintCtx = paintCanvas.getContext('2d');
+
+let obsDirty = true;
+
+/* NACA 4-digit geometry in local units (chord = 2, LE at x=+1 facing the flow).
+   Half-thickness and camber returned in local units. */
+function nacaT(xc, t){
+  return 2 * 5 * t * (0.2969*Math.sqrt(xc) - 0.1260*xc - 0.3516*xc*xc
+                    + 0.2843*xc*xc*xc - 0.1036*xc*xc*xc*xc);
+}
+function nacaC(xc, m, p){
+  if (m === 0) return 0;
+  const yc = xc < p
+    ? m / (p*p) * (2*p*xc - xc*xc)
+    : m / ((1-p)*(1-p)) * ((1 - 2*p) + 2*p*xc - xc*xc);
+  return 2 * yc;
+}
+
+/* Airfoil catalog. Camber is positive-up, so as drawn these produce LIFT;
+   flip the body for downforce. */
+const FOILS = {
+  n0016:  { m:0.00, p:0.40, t:0.16, label:'NACA 0016 · symmetric' },
+  n0030:  { m:0.00, p:0.40, t:0.30, label:'NACA 0030 · thick fairing / strut' },
+  n2412:  { m:0.02, p:0.40, t:0.12, label:'NACA 2412 · low drag, mild lift' },
+  n4412:  { m:0.04, p:0.40, t:0.12, label:'NACA 4412 · efficient lift' },
+  n9412:  { m:0.09, p:0.40, t:0.12, label:'NACA 9412 · high lift' },
+  race:   { m:0.13, p:0.45, t:0.13, label:'Race wing · max camber' },
+};
+
+function foilPath(ctx, geo){
+  ctx.beginPath();
+  const N = 34;
+  for (let i = 0; i <= N; i++){          // top surface, LE (x=+1) to TE (x=-1)
+    const xc = i / N, x = 1 - 2 * xc;
+    const y = nacaC(xc, geo.m, geo.p) + nacaT(xc, geo.t);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  for (let i = N; i >= 0; i--){          // bottom surface back
+    const xc = i / N, x = 1 - 2 * xc;
+    ctx.lineTo(x, nacaC(xc, geo.m, geo.p) - nacaT(xc, geo.t));
+  }
+  ctx.closePath();
+}
+
+const WEDGE = [[1,-0.5], [-1,0.5], [-1,-0.5]];
+
+/* Generic fastback car silhouette, ground line at y=-0.32, nose at x=+1 */
+const CAR_PTS = [
+  [ 1.00, -0.32], [ 1.00, -0.10], [ 0.96,  0.08], [ 0.86,  0.15],
+  [ 0.55,  0.19], [ 0.28,  0.33], [-0.05,  0.36], [-0.45,  0.34],
+  [-0.85,  0.10], [-1.00,  0.06], [-1.00, -0.32],
+];
+function pip(px, py, pts){
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++){
+    const [xi, yi] = pts[i], [xj, yj] = pts[j];
+    if ((yi > py) !== (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi)
+      inside = !inside;
+  }
+  return inside;
+}
+function polyPath(ctx, pts){
+  ctx.beginPath();
+  pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
+  ctx.closePath();
+}
+
+function drawShapePath(ctx, sh){
+  switch (sh.type){
+    case 'circle': ctx.beginPath(); ctx.arc(0, 0, 1, 0, Math.PI * 2); break;
+    case 'rect':   ctx.beginPath(); ctx.rect(-1, -0.62, 2, 1.24); break;
+    case 'plate':  ctx.beginPath(); ctx.rect(-1, -0.05, 2, 0.10); break;
+    case 'wedge':  polyPath(ctx, WEDGE); break;
+    case 'car':    polyPath(ctx, CAR_PTS); break;
+    case 'foil':   foilPath(ctx, FOILS[sh.foil]); break;
+  }
+}
+
+function rasterizeObstacles(){
+  obsCtx.setTransform(1, 0, 0, 1, 0, 0);
+  obsCtx.clearRect(0, 0, W, H);
+  obsCtx.fillStyle = '#fff';
+  // ground plane (lattice y ∈ [0, FLOORR))
+  if (state.floor){
+    obsCtx.setTransform(1, 0, 0, -1, 0, H);
+    obsCtx.fillRect(0, 0, W, FLOORR);
+  }
+  // freehand ink (same bitmap convention)
+  obsCtx.setTransform(1, 0, 0, 1, 0, 0);
+  obsCtx.drawImage(paintCanvas, 0, 0);
+  // primitives
+  for (const sh of state.shapes){
+    obsCtx.setTransform(1, 0, 0, -1, 0, H);
+    obsCtx.translate(sh.x, sh.y);
+    obsCtx.rotate(sh.rot);
+    obsCtx.scale(sh.s, sh.s * (sh.flip ? -1 : 1));
+    drawShapePath(obsCtx, sh);
+    obsCtx.fill();
+  }
+  obsCtx.setTransform(1, 0, 0, 1, 0, 0);
+
+  // upload
+  gl.bindTexture(gl.TEXTURE_2D, obsTex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, obsCanvas);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+
+  // frontal height + centroid of merged body profile (ground plane excluded)
+  const img = obsCtx.getImageData(0, 0, W, H).data;
+  const floorRow = state.floor ? H - FLOORR : H;   // device rows below this are floor
+  let hCount = 0, mSum = 0, mx = 0, my = 0;
+  for (let row = 0; row < floorRow; row++){
+    const base = row * W * 4;
+    let any = false;
+    for (let x = 0; x < W; x++){
+      if (img[base + x * 4 + 3] > 127){
+        any = true;
+        mSum++;
+        mx += x;
+        my += H - 1 - row;   // device row → lattice y
+      }
+    }
+    if (any) hCount++;
+  }
+  state.frontalH = hCount;
+  state.com = mSum > 0 ? [mx / mSum, my / mSum] : null;
+}
+
+/* ============================== shapes & interaction ============================== */
+function addShape(type, foil){
+  const s = { circle:22, rect:26, wedge:28, plate:34, car:52, foil:44 }[type];
+  const n = state.shapes.length;
+  state.shapes.push({
+    id: state.nextId++, type, foil: foil || 'n0016',
+    x: W * 0.5 + ((n % 3) - 1) * 30,
+    y: H * 0.5 + ((n % 2) ? -20 : 14),
+    s, rot: 0, flip: false,
+  });
+  state.sel = state.shapes.length - 1;
+  obsDirty = true;
+  drawOverlay();
+}
+
+function localPoint(sh, lx, ly){
+  const dx = lx - sh.x, dy = ly - sh.y;
+  const c = Math.cos(-sh.rot), s = Math.sin(-sh.rot);
+  return [(dx * c - dy * s) / sh.s, (dx * s + dy * c) / sh.s];
+}
+function pointInTri(p, a, b, c){
+  const sgn = (p1, p2, p3) => (p1[0]-p3[0])*(p2[1]-p3[1]) - (p2[0]-p3[0])*(p1[1]-p3[1]);
+  const d1 = sgn(p, a, b), d2 = sgn(p, b, c), d3 = sgn(p, c, a);
+  const neg = (d1 < 0) || (d2 < 0) || (d3 < 0);
+  const pos = (d1 > 0) || (d2 > 0) || (d3 > 0);
+  return !(neg && pos);
+}
+function hitShape(sh, lx, ly){
+  let [qx, qy] = localPoint(sh, lx, ly);
+  if (sh.flip) qy = -qy;
+  switch (sh.type){
+    case 'circle': return qx*qx + qy*qy <= 1;
+    case 'rect':   return Math.abs(qx) <= 1 && Math.abs(qy) <= 0.62;
+    case 'plate':  return Math.abs(qx) <= 1 && Math.abs(qy) <= 0.14; // padded for grabbing
+    case 'wedge':  return pointInTri([qx, qy], WEDGE[0], WEDGE[1], WEDGE[2]);
+    case 'car':    return pip(qx, qy, CAR_PTS);
+    case 'foil':{
+      if (Math.abs(qx) > 1) return false;
+      const g = FOILS[sh.foil], xc = (1 - qx) / 2;
+      const yc = nacaC(xc, g.m, g.p), yt = Math.max(nacaT(xc, g.t), 0.06); // padded
+      return qy >= yc - yt && qy <= yc + yt;
+    }
+  }
+  return false;
+}
+function shapePoint(sh, lx, ly){   // local → lattice
+  const c = Math.cos(sh.rot), s = Math.sin(sh.rot);
+  return [sh.x + (lx * c - ly * s) * sh.s, sh.y + (lx * s + ly * c) * sh.s];
+}
+const SCALE_H = [1.3, -1.3], ROT_H = [0, 1.7];  // handle positions, local units
+
+/* Handle positions in css px: pushed to a minimum distance from the body
+   center so they stay grabbable on small bodies, and clamped into the stage. */
+function handleCss(sh){
+  const r = stage.getBoundingClientRect();
+  const c = latToCss(sh.x, sh.y);
+  const minD = COARSE ? 56 : 30;
+  const place = local => {
+    let p = latToCss(...shapePoint(sh, local[0], local[1]));
+    let dx = p[0] - c[0], dy = p[1] - c[1];
+    const d = Math.hypot(dx, dy) || 1;
+    if (d < minD){ dx *= minD / d; dy *= minD / d; p = [c[0] + dx, c[1] + dy]; }
+    const pad = HANDLE_R + 4;
+    return [
+      Math.min(r.width - pad, Math.max(pad, p[0])),
+      Math.min(r.height - pad, Math.max(pad, p[1])),
+    ];
+  };
+  return { scale: place(SCALE_H), rot: place(ROT_H) };
+}
+
+/* lattice ↔ screen */
+function latToCss(lx, ly){
+  const r = stage.getBoundingClientRect();
+  return [lx / W * r.width, (1 - ly / H) * r.height];
+}
+function evtToLat(e){
+  const r = stage.getBoundingClientRect();
+  return [(e.clientX - r.left) / r.width * W, (1 - (e.clientY - r.top) / r.height) * H];
+}
+
+/* force vectors from the profile's center of mass */
+function arrow(x0, y0, x1, y1, color){
+  const dx = x1 - x0, dy = y1 - y0;
+  const len = Math.hypot(dx, dy);
+  if (len < 2) return;
+  const ux = dx / len, uy = dy / len;
+  const head = Math.min(10, len * 0.4);
+  uiCtx.strokeStyle = color;
+  uiCtx.fillStyle = color;
+  uiCtx.lineWidth = 2.5;
+  uiCtx.lineCap = 'round';
+  uiCtx.beginPath();
+  uiCtx.moveTo(x0, y0);
+  uiCtx.lineTo(x1 - ux * head * 0.6, y1 - uy * head * 0.6);
+  uiCtx.stroke();
+  uiCtx.beginPath();
+  uiCtx.moveTo(x1, y1);
+  uiCtx.lineTo(x1 - ux * head - uy * head * 0.45, y1 - uy * head + ux * head * 0.45);
+  uiCtx.lineTo(x1 - ux * head + uy * head * 0.45, y1 - uy * head - ux * head * 0.45);
+  uiCtx.closePath();
+  uiCtx.fill();
+}
+
+function drawForceVectors(rectW){
+  if (!state.com || state.cd == null || !state.metersOk) return;
+  const c = latToCss(state.com[0], state.com[1]);
+  const PX_PER_COEF = rectW * 0.06;                 // css px per unit coefficient
+  const cap = rectW * 0.35;
+  const dLen = Math.min(Math.abs(state.cd) * PX_PER_COEF, cap);
+  const lLen = Math.min(Math.abs(state.cl) * PX_PER_COEF, cap);
+
+  // center-of-mass marker
+  uiCtx.strokeStyle = 'rgba(232,234,240,0.85)';
+  uiCtx.lineWidth = 1.5;
+  uiCtx.beginPath(); uiCtx.arc(c[0], c[1], 4, 0, Math.PI * 2); uiCtx.stroke();
+  uiCtx.beginPath();
+  uiCtx.moveTo(c[0] - 7, c[1]); uiCtx.lineTo(c[0] + 7, c[1]);
+  uiCtx.moveTo(c[0], c[1] - 7); uiCtx.lineTo(c[0], c[1] + 7);
+  uiCtx.stroke();
+
+  // drag: horizontal, downstream is -x (left) for positive Cd
+  const dSign = state.cd >= 0 ? -1 : 1;
+  arrow(c[0], c[1], c[0] + dSign * dLen, c[1], '#ffb454');
+  // lift: vertical, screen y is down so positive Cl points up
+  const lSign = state.cl >= 0 ? -1 : 1;
+  arrow(c[0], c[1], c[0], c[1] + lSign * lLen, '#7bd8f0');
+
+  uiCtx.font = '10px ui-monospace, Menlo, monospace';
+  uiCtx.fillStyle = '#ffb454';
+  if (dLen > 14) uiCtx.fillText('D', c[0] + dSign * (dLen + 8) - 3, c[1] + 3.5);
+  uiCtx.fillStyle = '#7bd8f0';
+  if (lLen > 14) uiCtx.fillText('L', c[0] - 3, c[1] + lSign * (lLen + 10) + 3.5);
+}
+
+/* selection overlay */
+function drawOverlay(){
+  const r = stage.getBoundingClientRect();
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  if (uiCanvas.width !== Math.round(r.width * dpr)){
+    uiCanvas.width = Math.round(r.width * dpr);
+    uiCanvas.height = Math.round(r.height * dpr);
+  }
+  uiCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  uiCtx.clearRect(0, 0, r.width, r.height);
+
+  drawForceVectors(r.width);
+
+  const sh = state.shapes[state.sel];
+  if (!sh || state.tool !== 'select') return;
+
+  const ext = { circle:[1,1], rect:[1,0.62], plate:[1,0.14], wedge:[1,0.5],
+                car:[1,0.4], foil:[1,0.45] }[sh.type];
+  const corners = [[-ext[0],-ext[1]],[ext[0],-ext[1]],[ext[0],ext[1]],[-ext[0],ext[1]]]
+    .map(p => latToCss(...shapePoint(sh, p[0], p[1])));
+  uiCtx.strokeStyle = 'rgba(255,180,84,0.9)';
+  uiCtx.setLineDash([5, 4]);
+  uiCtx.lineWidth = 1;
+  uiCtx.beginPath();
+  corners.forEach((p, i) => i ? uiCtx.lineTo(p[0], p[1]) : uiCtx.moveTo(p[0], p[1]));
+  uiCtx.closePath();
+  uiCtx.stroke();
+  uiCtx.setLineDash([]);
+
+  const hc = handleCss(sh);
+  const cCss = latToCss(sh.x, sh.y);
+  uiCtx.strokeStyle = 'rgba(255,180,84,0.35)';
+  uiCtx.lineWidth = 1;
+  for (const p of [hc.scale, hc.rot]){
+    uiCtx.beginPath();
+    uiCtx.moveTo(cCss[0], cCss[1]);
+    uiCtx.lineTo(p[0], p[1]);
+    uiCtx.stroke();
+  }
+
+  // scale handle: square
+  uiCtx.fillStyle = 'rgba(255,180,84,0.25)';
+  uiCtx.strokeStyle = '#ffb454';
+  uiCtx.lineWidth = 2;
+  uiCtx.fillRect(hc.scale[0] - HANDLE_R, hc.scale[1] - HANDLE_R, HANDLE_R * 2, HANDLE_R * 2);
+  uiCtx.strokeRect(hc.scale[0] - HANDLE_R, hc.scale[1] - HANDLE_R, HANDLE_R * 2, HANDLE_R * 2);
+
+  // rotate handle: circle with arc glyph
+  uiCtx.beginPath();
+  uiCtx.arc(hc.rot[0], hc.rot[1], HANDLE_R, 0, Math.PI * 2);
+  uiCtx.fill();
+  uiCtx.stroke();
+  uiCtx.beginPath();
+  uiCtx.arc(hc.rot[0], hc.rot[1], HANDLE_R * 0.5, -Math.PI * 0.25, Math.PI, false);
+  uiCtx.stroke();
+}
+
+/* pointer interaction */
+let drag = null;    // {kind:'move'|'scale'|'rot'|'paint', ...}
+let gesture = null; // two-finger pinch/twist on the selected body
+const pointers = new Map(); // pointerId -> [cssX, cssY]
+
+function evtToCss(e){
+  const r = stage.getBoundingClientRect();
+  return [e.clientX - r.left, e.clientY - r.top];
+}
+function gestureMetrics(){
+  const [a, b] = [...pointers.values()];
+  return {
+    d: Math.hypot(b[0] - a[0], b[1] - a[1]),
+    a: Math.atan2(b[1] - a[1], b[0] - a[0]),
+  };
+}
+
+stage.addEventListener('pointerdown', e => {
+  if (!glOk) return;
+  stage.setPointerCapture(e.pointerId);
+  stage.focus({ preventScroll:true });
+  pointers.set(e.pointerId, evtToCss(e));
+
+  // second finger with a selected body: pinch = scale, twist = rotate
+  if (pointers.size === 2 && state.tool === 'select' && state.sel >= 0){
+    const sh = state.shapes[state.sel];
+    const m = gestureMetrics();
+    gesture = { sh, d0: m.d || 1, a0: m.a, s0: sh.s, rot0: sh.rot };
+    drag = null;
+    return;
+  }
+  if (pointers.size > 1) return;
+
+  const [lx, ly] = evtToLat(e);
+
+  if (state.tool === 'draw' || state.tool === 'erase'){
+    drag = { kind:'paint', last:[lx, ly] };
+    paintStroke(lx, ly, lx, ly);
+    return;
+  }
+  const sh = state.shapes[state.sel];
+  if (sh){
+    const hc = handleCss(sh);
+    const [px, py] = evtToCss(e);
+    if (Math.hypot(hc.scale[0] - px, hc.scale[1] - py) < HIT_R){
+      drag = { kind:'scale', sh }; return;
+    }
+    if (Math.hypot(hc.rot[0] - px, hc.rot[1] - py) < HIT_R){
+      drag = { kind:'rot', sh }; return;
+    }
+  }
+  for (let i = state.shapes.length - 1; i >= 0; i--){
+    if (hitShape(state.shapes[i], lx, ly)){
+      state.sel = i;
+      const s = state.shapes[i];
+      drag = { kind:'move', sh:s, ox: lx - s.x, oy: ly - s.y };
+      drawOverlay();
+      return;
+    }
+  }
+  state.sel = -1;
+  drawOverlay();
+});
+
+stage.addEventListener('pointermove', e => {
+  if (pointers.has(e.pointerId)) pointers.set(e.pointerId, evtToCss(e));
+
+  if (gesture && pointers.size >= 2){
+    const m = gestureMetrics();
+    const sh = gesture.sh;
+    sh.s = Math.min(110, Math.max(4, gesture.s0 * m.d / gesture.d0));
+    // screen y is down, lattice rotation is CCW-positive: invert the delta
+    sh.rot = gesture.rot0 - (m.a - gesture.a0);
+    obsDirty = true;
+    drawOverlay();
+    return;
+  }
+
+  if (!drag) return;
+  const [lx, ly] = evtToLat(e);
+  if (drag.kind === 'paint'){
+    paintStroke(drag.last[0], drag.last[1], lx, ly);
+    drag.last = [lx, ly];
+    return;
+  }
+  const sh = drag.sh;
+  if (drag.kind === 'move'){
+    sh.x = Math.min(W - 4, Math.max(4, lx - drag.ox));
+    sh.y = Math.min(H - 4, Math.max(4, ly - drag.oy));
+  } else if (drag.kind === 'scale'){
+    const d = Math.hypot(lx - sh.x, ly - sh.y);
+    sh.s = Math.min(110, Math.max(4, d / Math.hypot(SCALE_H[0], SCALE_H[1])));
+  } else if (drag.kind === 'rot'){
+    sh.rot = Math.atan2(ly - sh.y, lx - sh.x) - Math.PI / 2;
+  }
+  obsDirty = true;
+  drawOverlay();
+});
+
+['pointerup', 'pointercancel'].forEach(ev =>
+  stage.addEventListener(ev, e => {
+    pointers.delete(e.pointerId);
+    if (pointers.size < 2) gesture = null;
+    if (pointers.size === 0) drag = null;
+  }));
+
+function paintStroke(x0, y0, x1, y1){
+  const ctx = paintCtx;
+  const bs = state.brush * W / 512;   // brush size tracks lattice density
+  ctx.setTransform(1, 0, 0, -1, 0, H);
+  ctx.globalCompositeOperation = state.tool === 'erase' ? 'destination-out' : 'source-over';
+  ctx.strokeStyle = '#fff';
+  ctx.fillStyle = '#fff';
+  ctx.lineWidth = bs * 2;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  ctx.lineTo(x1, y1);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(x1, y1, bs, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = 'source-over';
+  obsDirty = true;
+}
+
+/* keyboard control of selected shape */
+stage.addEventListener('keydown', e => {
+  const sh = state.shapes[state.sel];
+  if (!sh) return;
+  const step = e.shiftKey ? 8 : 2;
+  let used = true;
+  switch (e.key){
+    case 'ArrowLeft':  sh.x -= step; break;
+    case 'ArrowRight': sh.x += step; break;
+    case 'ArrowUp':    sh.y += step; break;
+    case 'ArrowDown':  sh.y -= step; break;
+    case 'r':          sh.rot += Math.PI / 36; break;
+    case 'R':          sh.rot -= Math.PI / 36; break;
+    case 'f': case 'F': flipSelected(); return;
+    case '+': case '=': sh.s = Math.min(110, sh.s * 1.1); break;
+    case '-': case '_': sh.s = Math.max(4, sh.s / 1.1); break;
+    case 'Delete': case 'Backspace': deleteSelected(); break;
+    default: used = false;
+  }
+  if (used){
+    e.preventDefault();
+    obsDirty = true;
+    drawOverlay();
+  }
+});
+
+function deleteSelected(){
+  if (state.sel < 0) return;
+  state.shapes.splice(state.sel, 1);
+  state.sel = -1;
+  obsDirty = true;
+  drawOverlay();
+}
+
+/* ============================== UI wiring ============================== */
+function setTool(t){
+  state.tool = t;
+  $('toolSelect').setAttribute('aria-pressed', t === 'select');
+  $('toolDraw').setAttribute('aria-pressed', t === 'draw');
+  $('toolErase').setAttribute('aria-pressed', t === 'erase');
+  stage.style.cursor = t === 'select' ? 'default' : 'crosshair';
+  drawOverlay();
+}
+$('toolSelect').onclick = () => setTool('select');
+$('toolDraw').onclick   = () => setTool('draw');
+$('toolErase').onclick  = () => setTool('erase');
+
+$('addCircle').onclick = () => addShape('circle');
+$('addRect').onclick   = () => addShape('rect');
+$('addWedge').onclick  = () => addShape('wedge');
+$('addPlate').onclick  = () => addShape('plate');
+$('addCar').onclick    = () => addShape('car');
+
+const foilSel = $('foilSel');
+for (const [key, g] of Object.entries(FOILS)){
+  const o = document.createElement('option');
+  o.value = key;
+  o.textContent = g.label;
+  foilSel.appendChild(o);
+}
+$('addFoil').onclick = () => addShape('foil', foilSel.value);
+
+/* Import an SVG as freehand obstacle ink. The imported image becomes part of
+   paintCanvas, so it can be modified with Erase and removed by Clear bodies.
+   The file chooser is intentionally not cleared after import. */
+const svgFile = $('svgFile');
+const svgStatus = $('svgStatus');
+
+svgFile.addEventListener('change', async event => {
+  const file = event.target.files?.[0];
+  if (!file) return;
+
+  svgStatus.textContent = `Loading ${file.name}…`;
+
+  try {
+    const svgText = await file.text();
+    const parser = new DOMParser();
+    const svgDoc = parser.parseFromString(svgText, 'image/svg+xml');
+    const parseError = svgDoc.querySelector('parsererror');
+    if (parseError) throw new Error('The selected file is not valid SVG XML.');
+
+    const root = svgDoc.documentElement;
+    if (root.localName !== 'svg') throw new Error('The selected file has no SVG root element.');
+
+    // Scripts are not needed for a static obstacle and should not execute.
+    root.querySelectorAll('script, foreignObject').forEach(node => node.remove());
+
+    // Remove event-handler attributes and external hrefs from all elements.
+    root.querySelectorAll('*').forEach(node => {
+      for (const attr of [...node.attributes]){
+        const name = attr.name.toLowerCase();
+        const value = attr.value.trim();
+        if (name.startsWith('on')) node.removeAttribute(attr.name);
+        if ((name === 'href' || name.endsWith(':href')) &&
+            !value.startsWith('#') && !value.startsWith('data:')){
+          node.removeAttribute(attr.name);
+        }
+      }
+    });
+
+    const cleanSvg = new XMLSerializer().serializeToString(root);
+    const blob = new Blob([cleanSvg], { type:'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+
+    img.onload = () => {
+      try {
+        importSvgImage(img);
+        svgStatus.textContent = `Imported ${file.name}`;
+      } catch (error){
+        console.error(error);
+        svgStatus.textContent = 'Import failed';
+        alert(`SVG import failed: ${error.message}`);
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    };
+
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      svgStatus.textContent = 'Import failed';
+      alert(`The SVG could not be rendered: ${file.name}`);
+    };
+
+    img.src = url;
+  } catch (error){
+    console.error(error);
+    svgStatus.textContent = 'Import failed';
+    alert(`SVG import failed: ${error.message}`);
+  }
+});
+
+function importSvgImage(img){
+  const maxWidth = W * 0.60;
+  const maxHeight = H * 0.55;
+  const sourceWidth = img.naturalWidth || img.width || 300;
+  const sourceHeight = img.naturalHeight || img.height || 150;
+
+  if (!(sourceWidth > 0) || !(sourceHeight > 0))
+    throw new Error('The SVG has no usable width, height, or viewBox.');
+
+  const scale = Math.min(maxWidth / sourceWidth, maxHeight / sourceHeight);
+  const drawWidth = sourceWidth * scale;
+  const drawHeight = sourceHeight * scale;
+  const x = (W - drawWidth) * 0.5;
+  const y = (H - drawHeight) * 0.5;
+
+  paintCtx.save();
+  paintCtx.setTransform(1, 0, 0, 1, 0, 0);
+  paintCtx.globalCompositeOperation = 'source-over';
+  paintCtx.drawImage(img, x, y, drawWidth, drawHeight);
+  paintCtx.restore();
+
+  obsDirty = true;
+}
+
+function flipSelected(){
+  const s = state.shapes[state.sel];
+  if (!s) return;
+  s.flip = !s.flip;
+  obsDirty = true;
+  drawOverlay();
+}
+$('flipBtn').onclick = flipSelected;
+$('delBtn').onclick    = deleteSelected;
+$('rotL').onclick = () => { const s = state.shapes[state.sel]; if (s){ s.rot -= Math.PI/36; obsDirty = true; drawOverlay(); } };
+$('rotR').onclick = () => { const s = state.shapes[state.sel]; if (s){ s.rot += Math.PI/36; obsDirty = true; drawOverlay(); } };
+$('scUp').onclick   = () => { const s = state.shapes[state.sel]; if (s){ s.s = Math.min(110, s.s*1.1); obsDirty = true; drawOverlay(); } };
+$('scDown').onclick = () => { const s = state.shapes[state.sel]; if (s){ s.s = Math.max(4, s.s/1.1); obsDirty = true; drawOverlay(); } };
+
+const speedEl = $('speed');
+const MPH_MAX = 150, U_MAX = 0.17;   // slider top = 150 mph = lattice Ma ≈ 0.29
+function applySpeed(){
+  const v = +speedEl.value;
+  const mph = Math.round(v / 100 * MPH_MAX);
+  state.U = U_MAX * v / 100;
+  $('speedOut').textContent = `${mph} mph · U=${state.U.toFixed(3)}`;
+  speedEl.setAttribute('aria-valuetext',
+    `${mph} miles per hour, lattice velocity ${state.U.toFixed(3)}`);
+}
+speedEl.addEventListener('input', applySpeed);
+applySpeed();
+
+$('brush').addEventListener('input', e => {
+  state.brush = +e.target.value;
+  $('brushOut').textContent = `${state.brush} px`;
+});
+
+document.querySelectorAll('input[name="viz"]').forEach(r =>
+  r.addEventListener('change', e => { state.mode = +e.target.value; }));
+
+$('floorChk').addEventListener('change', e => {
+  state.floor = e.target.checked;
+  obsDirty = true;
+});
+
+const pauseBtn = $('pauseBtn');
+function setPaused(p){
+  state.paused = p;
+  pauseBtn.textContent = p ? 'Run' : 'Pause';
+  pauseBtn.setAttribute('aria-pressed', String(p));
+}
+pauseBtn.onclick = () => setPaused(!state.paused);
+
+$('resetBtn').onclick = () => { if (glOk) initFluid(); };
+$('clearBtn').onclick = () => {
+  state.shapes = [];
+  state.sel = -1;
+  paintCtx.clearRect(0, 0, W, H);
+  obsDirty = true;
+  drawOverlay();
+};
+
+/* meters */
+const cdVal = $('cdVal'), clVal = $('clVal'), cdFill = $('cdFill'), clFill = $('clFill');
+function updateMeters(){
+  if (!state.metersOk){ cdVal.textContent = 'n/a'; clVal.textContent = 'n/a'; return; }
+  if (state.cd == null){
+    cdVal.textContent = '—'; clVal.textContent = '—';
+    cdFill.style.width = '0'; clFill.style.width = '0';
+    return;
+  }
+  cdVal.textContent = state.cd.toFixed(2);
+  clVal.textContent = (state.cl >= 0 ? '+' : '') + state.cl.toFixed(2);
+  cdFill.style.width = `${Math.min(Math.abs(state.cd) / 4, 1) * 100}%`;
+  const half = Math.min(Math.abs(state.cl) / 2.5, 1) * 50;
+  clFill.style.width = `${half}%`;
+  clFill.classList.toggle('neg', state.cl < 0);
+  clFill.style.left = state.cl < 0 ? `${50 - half}%` : '50%';
+}
+
+/* ============================== sizing & main loop ============================== */
+function resize(){
+  const r = stage.getBoundingClientRect();
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  glCanvas.width = Math.max(2, Math.round(r.width * dpr));
+  glCanvas.height = Math.max(2, Math.round(r.height * dpr));
+  drawOverlay();
+}
+new ResizeObserver(resize).observe(stage);
+
+let frame = 0;
+function loop(){
+  if (glOk){
+    if (obsDirty){ rasterizeObstacles(); obsDirty = false; }
+    if (!state.paused){
+      stepFluid();
+      stepDye();
+      if (frame % FORCE_EVERY === 0){
+        measureForces();
+        updateMeters();
+        drawOverlay();
+      }
+    }
+    draw();
+    frame++;
+  }
+  requestAnimationFrame(loop);
+}
+
+const detailSel = $('detailSel');
+detailSel.addEventListener('change', () => {
+  if (!glOk) return;
+  const v = detailSel.value;
+  setResolution(v === 'auto' ? benchAuto : v);
+});
+
+let benchAuto = 'standard';
+if (glOk){
+  try {
+    buildPrograms();
+    allocSim();
+    resize();
+    rasterizeObstacles();
+    obsDirty = false;
+    initFluid();
+    benchAuto = benchmarkPick();
+    if (benchAuto !== 'standard') setResolution(benchAuto);
+    detailSel.options[0].textContent = `Auto (${RES[benchAuto].label})`;
+    $('latticeLabel').textContent = `${W}×${H} lattice`;
+    addShape('circle');            // starter body
+    state.sel = -1;
+    drawOverlay();
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches) setPaused(true);
+  } catch (err){
+    glOk = false;
+    $('glError').textContent = 'GPU setup failed: ' + err.message;
+    $('glError').style.display = 'grid';
+  }
+}
+requestAnimationFrame(loop);
