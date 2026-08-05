@@ -8,7 +8,7 @@ The application can display smoke, local speed, and vorticity; estimate relative
 
 ---
 
-![Section Tunnel example showing the imported outline and generated flow](outline_BW.svg)
+![Section Tunnel example showing the imported outline and generated flow](extreme_res.png)
 
 ## Files
 
