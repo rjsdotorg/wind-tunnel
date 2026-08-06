@@ -15,7 +15,7 @@ The application can display smoke, local speed, and vorticity; estimate relative
 The application is contained in one HTML file:
 
 ```text
-wind-tunnel-stateful-manual-save.html
+wind-tunnel.html
 ```
 
 No separate JavaScript file, stylesheet, web server, package manager, or external library is required.
@@ -25,9 +25,9 @@ Open the HTML file directly in a modern browser.
 Recommended browsers:
 
 - Google Chrome
-- Microsoft Edge v109.* on Win7 or later
-- Mozilla Firefox >115.* (Win7 will show "WebGL2 with float render targets is required for this demo and is not available in this browser.")
-- Brave v1.48.* works
+- Microsoft Edge >=v109.* on Win7 or later
+- Mozilla Firefox >=115.* (Win7 will show "WebGL2 with float render targets is required for this demo and is not available in this browser.")
+- Brave >=v1.48.* works
 
 The browser and GPU must support:
 
@@ -41,10 +41,9 @@ If those features are unavailable, the page displays a WebGL compatibility error
 
 ## Starting the application
 
-1. Extract the ZIP file, if applicable.
-2. Double-click `wind-tunnel-stateful-manual-save.html`.
-3. Allow the browser a moment to compile the GPU shaders and benchmark the available graphics hardware.
-4. The simulation starts with flow moving from right to left.
+1. Double-click `wind-tunnel-stateful-manual-save.html`.
+2. Allow the browser a moment to compile the GPU shaders and benchmark the available graphics hardware.
+3. The simulation starts with flow moving from right to left.
 
 The arrow at the top of the page indicates the flow direction:
 
