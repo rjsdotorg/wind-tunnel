@@ -178,6 +178,7 @@
       <label class="opt"><input type="radio" name="viz" value="0" checked> smoke</label>
       <label class="opt"><input type="radio" name="viz" value="1"> speed</label>
       <label class="opt"><input type="radio" name="viz" value="2"> vorticity</label>
+      <label class="opt"><input type="radio" name="viz" value="3"> pressure</label>
     </div>
     <div class="row">
       <label class="opt"><input type="checkbox" id="floorChk"> ground plane</label>
@@ -191,7 +192,7 @@
         <option value="high">High · 768×384</option>
         <option value="ultra">Ultra · 1024×512</option>
 		<option value="extreme">Extreme · 1536×768</option>
-		<option value="extreme">Plaid · 2048x1024</option>
+		<option value="plaid">Plaid · 2048×1024</option>
       </select>
     </div>
     <div class="row">
@@ -443,8 +444,24 @@ void main(){
   if (texelFetch(uObs, p, 0).r > 0.5){ o = vec4(0.0); return; }
   vec2 vel = texelFetch(uF2, p, 0).zw;
   vec2 pos = (vec2(p) + 0.5 - vel * uDt) / uRes;
-  float d = texture(uDye, pos).r * 0.998;
-  if (p.x >= int(uRes.x) - 3 && (p.y % uStripe) < max(uStripe / 6, 2)) d = 1.0;
+
+  // Semi-Lagrangian advection with linear filtering gradually blurs thin
+  // tracer bands.  Apply a restrained unsharp correction around the
+  // back-traced position to counter that numerical diffusion.
+  vec2 texel = 1.0 / uRes;
+  float c  = texture(uDye, pos).r * 0.99985;
+  float n1 = texture(uDye, pos + vec2( texel.x, 0.0)).r;
+  float n2 = texture(uDye, pos + vec2(-texel.x, 0.0)).r;
+  float n3 = texture(uDye, pos + vec2(0.0,  texel.y)).r;
+  float n4 = texture(uDye, pos + vec2(0.0, -texel.y)).r;
+  float blur = 0.25 * (n1 + n2 + n3 + n4);
+
+  float d = clamp(c + 0.28 * (c - blur), 0.0, 1.0) * 0.999995;
+
+  // Narrower inlet streaks: about one-tenth of the stripe spacing.
+  if (p.x >= int(uRes.x) - 3 &&
+      (p.y % uStripe) < max(uStripe / 10, 1)) d = 1.0;
+
   o = vec4(d, 0.0, 0.0, 1.0);
 }`;
 
@@ -532,12 +549,20 @@ void main(){
   } else if (uMode == 0){
     float d = texture(uDye, uv).r;
     vec3 bg = vec3(0.031, 0.039, 0.059);
-    vec3 smoke = mix(vec3(0.82, 0.86, 0.90), vec3(1.0), clamp(d * 1.15 - 0.20, 0.0, 1.0));
-    col = bg + smoke * d * 1.15;
+
+    // Display-only contrast curve: make dilute tracer visible without
+    // feeding that boost back into the simulated dye field.
+    float vis = pow(clamp(d, 0.0, 1.0), 0.62);
+    vec3 smoke = mix(
+      vec3(0.78, 0.90, 0.96),
+      vec3(1.00),
+      smoothstep(0.18, 0.85, vis)
+    );
+    col = bg + smoke * vis * 1.22;
   } else if (uMode == 1){
     float t = clamp(length(velAt(p)) / (uU * 1.6 + 1e-5), 0.0, 1.0);
     col = speedmap(t);
-  } else {
+  } else if (uMode == 2){
     float c = (velAt(p + ivec2(1,0)).y - velAt(p - ivec2(1,0)).y
              - velAt(p + ivec2(0,1)).x + velAt(p - ivec2(0,1)).x) * 0.5;
     float t = clamp(c / (uU * 0.65 + 1e-5), -1.0, 1.0);
@@ -549,6 +574,35 @@ void main(){
     col = base
         + max( t, 0.0) * posCol * 1.25
         + max(-t, 0.0) * negCol * 1.25;
+  } else {
+    float rhoSum = 0.0;
+    float weightSum = 0.0;
+    for (int dy = -1; dy <= 1; dy++){
+      for (int dx = -1; dx <= 1; dx++){
+        ivec2 q = clamp(p + ivec2(dx,dy), ivec2(0), R - 1);
+        if (texelFetch(uObs, q, 0).r < 0.5){
+          float wx = dx == 0 ? 2.0 : 1.0;
+          float wy = dy == 0 ? 2.0 : 1.0;
+          float w = wx * wy;
+          rhoSum += texelFetch(uF2, q, 0).y * w;
+          weightSum += w;
+        }
+      }
+    }
+    float rho = weightSum > 0.0 ? rhoSum / weightSum : 1.0;
+    float dp = rho - 1.0;
+    float range = max(0.012, 2.5 * uU * uU);
+    float t = clamp(dp / range, -1.0, 1.0);
+    float a = smoothstep(0.06, 1.0, abs(t));
+    t = sign(t) * a;
+
+    vec3 lowP    = vec3(0.18, 0.48, 1.00);
+    vec3 neutral = vec3(0.92, 0.93, 0.95);
+    vec3 highP   = vec3(1.00, 0.38, 0.16);
+
+    col = t < 0.0
+      ? mix(neutral, lowP, -t)
+      : mix(neutral, highP, t);
   }
 
   fc = vec4(col, 1.0);
@@ -674,7 +728,7 @@ function benchmarkPick(){
   const perStep = (performance.now() - t0) / N;   // ms per step at current W×H
   const baseArea = W * H;
   let pick = 'low';
-  for (const key of ['standard', 'high', 'ultra']){
+  for (const key of ['standard', 'high', 'ultra', 'extreme', 'plaid']){
     const r = RES[key];
     const cost = perStep * (r.w * r.h / baseArea) * Math.round(10 * r.w / 512);
     if (cost < 9) pick = key;
@@ -1692,7 +1746,7 @@ async function loadTunnelState({ silent=false } = {}){
     $('speed').value = String(Number.isFinite(saved.speed) ? saved.speed : 45);
     applySpeed();
 
-    state.mode = [0,1,2].includes(saved.mode) ? saved.mode : 0;
+    state.mode = [0,1,2,3].includes(saved.mode) ? saved.mode : 0;
     const modeRadio = document.querySelector(`input[name="viz"][value="${state.mode}"]`);
     if (modeRadio) modeRadio.checked = true;
 

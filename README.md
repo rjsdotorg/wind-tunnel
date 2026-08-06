@@ -8,7 +8,7 @@ The application can display smoke, local speed, and vorticity; estimate relative
 
 ---
 
-![Section Tunnel example showing the imported outline and generated flow](extreme_res.png)
+![Section Tunnel example showing the imported outline and generated flow](outline_BW.svg)
 
 ## Files
 
@@ -189,6 +189,34 @@ Use this mode to identify:
 - Alternating wake vortices
 - Recirculation
 - Strong rotational regions near body edges
+
+
+## Pressure visualization
+
+Select **pressure** to display relative lattice pressure.
+
+In the isothermal D2Q9 lattice-Boltzmann model, pressure is proportional to density:
+
+```text
+p = ρ / 3
+```
+
+The display uses density deviation from the freestream value:
+
+- Blue: lower relative pressure
+- Pale neutral: approximately freestream pressure
+- Orange/red: higher relative pressure
+
+The scale changes with inlet velocity squared so that the view remains useful across speed settings. It is a relative lattice-pressure visualization, not a calibrated pressure measurement in pascals.
+
+Use this mode to identify:
+
+- High-pressure stagnation regions
+- Low-pressure accelerated flow
+- Pressure differences across a foil
+- Pressure recovery behind a body
+- Underbody and ground-clearance pressure changes
+
 
 ---
 
