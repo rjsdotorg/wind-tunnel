@@ -1,1882 +1,898 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Section Tunnel — 2D LBM wind tunnel</title>
-<style>
-  :root{
-    --bg:#0b0d12; --panel:#12151d; --panel2:#171b25; --line:#232838;
-    --ink:#e8eaf0; --mut:#8b93a7; --amber:#ffb454; --cyan:#7bd8f0;
-    --neg:#5aa7ff; --radius:6px;
-    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
-  }
-  *{box-sizing:border-box}
-  html,body{margin:0;padding:0}
-  body{
-    background:var(--bg); color:var(--ink);
-    font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-    padding:16px; max-width:1180px; margin-inline:auto;
-  }
-  header{
-    display:flex; flex-wrap:wrap; align-items:flex-end; gap:20px;
-    padding:6px 2px 14px; border-bottom:1px solid var(--line); margin-bottom:14px;
-  }
-  h1{
-    font-size:15px; font-weight:700; letter-spacing:.14em; text-transform:uppercase;
-    margin:0; line-height:1.2;
-  }
-  h1 small{
-    display:block; font:11px/1.4 var(--mono); color:var(--mut);
-    letter-spacing:.04em; text-transform:none; font-weight:400; margin-top:3px;
-  }
-  .flowtag{
-    font:11px var(--mono); color:var(--amber); letter-spacing:.18em;
-    border:1px solid color-mix(in srgb,var(--amber) 40%,transparent);
-    padding:3px 8px; border-radius:3px; align-self:center;
-  }
-  .spacer{flex:1}
-
-  /* instrumentation meters */
-  .meters{display:flex; gap:18px}
-  .meter{min-width:180px}
-  .meter-h{
-    display:flex; justify-content:space-between; align-items:baseline;
-    font:11px var(--mono); letter-spacing:.12em; color:var(--mut); margin-bottom:4px;
-  }
-  .meter-h output{color:var(--ink); font-size:15px; letter-spacing:0}
-  .meter-bar{
-    position:relative; height:12px; background:var(--panel2);
-    border:1px solid var(--line); border-radius:3px; overflow:hidden;
-    background-image:repeating-linear-gradient(90deg,transparent 0 24px,var(--line) 24px 25px);
-  }
-  .meter-bar .fill{
-    position:absolute; top:0; bottom:0; left:0; width:0;
-    background:var(--amber); transition:width .12s linear;
-  }
-  #clBar .zero{
-    position:absolute; top:-2px; bottom:-2px; left:50%; width:1px; background:var(--mut);
-  }
-  #clFill{left:50%; transform-origin:left; background:var(--amber)}
-  #clFill.neg{background:var(--neg)}
-
-  .stage{
-    position:relative; aspect-ratio:2/1; border:1px solid var(--line);
-    border-radius:var(--radius); overflow:hidden; background:#080a0f;
-    touch-action:none; outline-offset:2px;
-  }
-  .stage:focus-visible{outline:2px solid var(--amber)}
-  .stage canvas{position:absolute; inset:0; width:100%; height:100%; display:block}
-  #uiCanvas{pointer-events:none}
-  #glError{
-    display:none; position:absolute; inset:0; place-items:center; padding:24px;
-    font:13px var(--mono); color:var(--mut); text-align:center;
-  }
-
-  .hint{font:11px var(--mono); color:var(--mut); margin:8px 2px 14px; letter-spacing:.02em}
-
-  .deck{display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:12px}
-  fieldset{
-    border:1px solid var(--line); border-radius:var(--radius); background:var(--panel);
-    padding:12px 14px 14px; margin:0; min-width:0;
-  }
-  legend{
-    font:11px var(--mono); letter-spacing:.14em; text-transform:uppercase;
-    color:var(--mut); padding:0 6px;
-  }
-  .row{display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:8px}
-  .row:first-of-type{margin-top:2px}
-
-  button{
-    font:12px var(--mono); letter-spacing:.03em; color:var(--ink);
-    background:var(--panel2); border:1px solid var(--line); border-radius:4px;
-    padding:6px 11px; cursor:pointer;
-  }
-  button:hover{border-color:var(--mut)}
-  button:focus-visible{outline:2px solid var(--amber); outline-offset:1px}
-  button[aria-pressed="true"]{
-    background:color-mix(in srgb,var(--amber) 16%,var(--panel2));
-    border-color:var(--amber); color:var(--amber);
-  }
-  button.danger:hover{border-color:#ff7b6b; color:#ff9d90}
-
-  select{
-    font:12px var(--mono); color:var(--ink); background:var(--panel2);
-    border:1px solid var(--line); border-radius:4px; padding:6px 8px;
-    max-width:100%; cursor:pointer;
-  }
-  select:focus-visible{outline:2px solid var(--amber); outline-offset:1px}
-
-  label.opt{display:flex; gap:7px; align-items:center; font:12px var(--mono); color:var(--ink); cursor:pointer}
-  input[type="checkbox"]{accent-color:var(--amber); width:15px; height:15px}
-  input[type="radio"]{accent-color:var(--amber)}
-
-  .slider{display:flex; align-items:center; gap:10px; min-width:220px}
-  .slider label{font:11px var(--mono); letter-spacing:.1em; color:var(--mut); white-space:nowrap}
-  .slider output{font:12px var(--mono); color:var(--ink); min-width:64px; text-align:right}
-  input[type="range"]{
-    flex:1; appearance:none; height:4px; border-radius:2px; background:var(--line);
-    cursor:pointer; min-width:110px;
-  }
-  input[type="range"]::-webkit-slider-thumb{
-    appearance:none; width:16px; height:16px; border-radius:50%;
-    background:var(--amber); border:2px solid var(--bg);
-  }
-  input[type="range"]::-moz-range-thumb{
-    width:14px; height:14px; border-radius:50%; background:var(--amber); border:2px solid var(--bg);
-  }
-  input[type="range"]:focus-visible{outline:2px solid var(--amber); outline-offset:3px}
-
-  @media (max-width:720px){
-    .meters{width:100%}
-    .meter{flex:1; min-width:0}
-  }
-</style>
-</head>
-<body>
-
-<header>
-  <h1>Section Tunnel
-    <small>2D lattice-Boltzmann · D2Q9 · GPU (WebGL2) · <span id="latticeLabel">512×256 lattice</span></small>
-  </h1>
-  <span class="flowtag" aria-hidden="true">◀ FLOW</span>
-  <div class="spacer"></div>
-  <div class="meters" role="group" aria-label="Force coefficients">
-    <div class="meter">
-      <div class="meter-h"><span>DRAG C<sub>d</sub></span><output id="cdVal" aria-live="off">—</output></div>
-      <div class="meter-bar" id="cdBar"><div class="fill" id="cdFill"></div></div>
-    </div>
-    <div class="meter">
-      <div class="meter-h"><span>LIFT C<sub>l</sub></span><output id="clVal" aria-live="off">—</output></div>
-      <div class="meter-bar" id="clBar"><div class="fill" id="clFill"></div><div class="zero"></div></div>
-    </div>
-  </div>
-</header>
-
-<div class="stage" id="stage" tabindex="0" role="application"
-     aria-label="Wind tunnel test section. Flow enters from the right. Use the controls below to add and shape bodies; arrow keys move the selected body, R and Shift+R rotate, plus and minus scale, Delete removes.">
-  <canvas id="glCanvas"></canvas>
-  <canvas id="uiCanvas"></canvas>
-  <div id="glError">WebGL2 with float render targets is required for this demo and is not available in this browser.</div>
-</div>
-<p class="hint" id="hint">
-  Select: drag body to move · square handle scales · round handle rotates ·
-  touch: pinch selected body to scale, twist two fingers to rotate · Flip inverts camber (lift → downforce) · Delete removes.
-  Draw and erase affect freehand ink only. Coefficients are relative, normalized by frontal height and q&#8734;.
-  Speed is Mach-scaled to 150 mph max; Reynolds number is lattice-limited, so compare shapes rather than reading absolute values.
-</p>
-
-<div class="deck">
-  <fieldset>
-    <legend>Tunnel</legend>
-    <div class="row slider">
-      <label for="speed">Speed</label>
-      <input type="range" id="speed" min="0" max="100" value="45" step="1">
-      <output id="speedOut" for="speed">—</output>
-    </div>
-    <div class="row" role="radiogroup" aria-label="Visualization">
-      <label class="opt"><input type="radio" name="viz" value="0" checked> smoke</label>
-      <label class="opt"><input type="radio" name="viz" value="1"> speed</label>
-      <label class="opt"><input type="radio" name="viz" value="2"> vorticity</label>
-      <label class="opt"><input type="radio" name="viz" value="3"> pressure</label>
-    </div>
-    <div class="row">
-      <label class="opt"><input type="checkbox" id="floorChk"> ground plane</label>
-    </div>
-    <div class="row">
-      <label class="opt" for="detailSel">Detail</label>
-      <select id="detailSel" aria-label="Simulation detail">
-        <option value="auto" selected>Auto (benchmark)</option>
-        <option value="low">Low · 384×192</option>
-        <option value="standard">Standard · 512×256</option>
-        <option value="high">High · 768×384</option>
-        <option value="ultra">Ultra · 1024×512</option>
-		<option value="extreme">Extreme · 1536×768</option>
-		<option value="plaid">Plaid · 2048×1024</option>
-      </select>
-    </div>
-    <div class="row">
-      <button id="pauseBtn" aria-pressed="false">Pause</button>
-      <button id="resetBtn">Reset flow</button>
-      <button id="clearBtn" class="danger">Clear bodies</button>
-    </div>
-    <div class="row">
-      <button id="saveStateBtn">Save state</button>
-      <button id="loadStateBtn">Load state</button>
-      <button id="clearStateBtn" class="danger">Clear saved state</button>
-      <output id="stateStatus" aria-live="polite"></output>
-    </div>
-  </fieldset>
-
-  <fieldset>
-    <legend>Tool</legend>
-    <div class="row" role="group" aria-label="Pointer tool">
-      <button id="toolSelect" aria-pressed="true">Select</button>
-      <button id="toolDraw" aria-pressed="false">Draw</button>
-      <button id="toolErase" aria-pressed="false">Erase</button>
-    </div>
-    <div class="row slider">
-      <label for="brush">Brush</label>
-      <input type="range" id="brush" min="2" max="18" value="5" step="1">
-      <output id="brushOut" for="brush">5 px</output>
-    </div>
-  </fieldset>
-
-  <fieldset>
-    <legend>Bodies</legend>
-    <div class="row">
-      <button id="addCircle">+ Cylinder</button>
-      <button id="addRect">+ Box</button>
-      <button id="addWedge">+ Wedge</button>
-      <button id="addPlate">+ Plate</button>
-      <button id="addCar">+ Car body</button>
-    </div>
-    <div class="row">
-      <label class="opt" for="foilSel">Foil</label>
-      <select id="foilSel" aria-label="Airfoil profile"></select>
-      <button id="addFoil">+ Add foil</button>
-    </div>
-    <div class="row">
-      <label class="opt" for="svgFile">Import SVG</label>
-      <input type="file" id="svgFile" accept=".svg,image/svg+xml">
-      <output id="svgStatus" aria-live="polite"></output>
-    </div>
-    <div class="row">
-      <button id="flipBtn" title="Flip selected body vertically (lift ↔ downforce)">Flip ⇅</button>
-      <button id="rotL" title="Rotate selected −5°">⟲ 5°</button>
-      <button id="rotR" title="Rotate selected +5°">⟳ 5°</button>
-      <button id="scDown" title="Scale selected −10%">− size</button>
-      <button id="scUp" title="Scale selected +10%">+ size</button>
-      <button id="delBtn" class="danger">Delete selected</button>
-    </div>
-  </fieldset>
-</div>
-
-<script>
-'use strict';
-/* ============================== constants ============================== */
-let W = 512, H = 256;            // lattice (mutable — see setResolution)
-let SUBv = 10;                   // LBM steps per frame, scaled with resolution
-let FLOORR = 10;                 // ground plane thickness (cells), scaled with H
-const TAU0 = 0.53;               // base relaxation time
-const FORCE_EVERY = 6;           // frames between force readbacks
-
-const RES = {
-  low:      { w: 384,  h: 192, label: 'Low' },
-  standard: { w: 512,  h: 256, label: 'Standard' },
-  high:     { w: 768,  h: 384, label: 'High' },
-  ultra:    { w: 1024, h: 512, label: 'Ultra' },
-  extreme:  { w: 1536, h: 768, label: 'Extreme' },
-  plaid:    { w: 2048, h: 1024, label: 'Plaid' },
-};
-
-/* D2Q9 for GLSL injection */
-const GLSL_COMMON = `
-const ivec2 E[9] = ivec2[9](
-  ivec2(0,0), ivec2(1,0), ivec2(0,1), ivec2(-1,0), ivec2(0,-1),
-  ivec2(1,1), ivec2(-1,1), ivec2(-1,-1), ivec2(1,-1));
-const float WT[9] = float[9](
-  4.0/9.0, 1.0/9.0, 1.0/9.0, 1.0/9.0, 1.0/9.0,
-  1.0/36.0, 1.0/36.0, 1.0/36.0, 1.0/36.0);
-const int OPP[9] = int[9](0,3,4,1,2,7,8,5,6);
-float feq(int i, float rho, vec2 u){
-  vec2 ei = vec2(E[i]);
-  float eu = dot(ei, u);
-  return WT[i]*rho*(1.0 + 3.0*eu + 4.5*eu*eu - 1.5*dot(u,u));
-}`;
-
-/* ============================== state ============================== */
-const COARSE = matchMedia('(pointer: coarse)').matches;
-const HANDLE_R = COARSE ? 14 : 6;        // drawn size
-const HIT_R = COARSE ? 30 : 12;          // hit radius, css px
-const state = {
-  tool: 'select',
-  shapes: [],
-  sel: -1,
-  floor: false,
-  mode: 0,
-  paused: false,
-  U: 0.0875,
-  brush: 5,
-  frontalH: 0,
-  com: null,
-  cd: null, cl: null,
-  metersOk: true,
-  nextId: 1,
-};
-
-/* ============================== DOM ============================== */
-const $ = id => document.getElementById(id);
-const stage = $('stage');
-const glCanvas = $('glCanvas');
-const uiCanvas = $('uiCanvas');
-const uiCtx = uiCanvas.getContext('2d');
-
-/* ============================== WebGL setup ============================== */
-const gl = glCanvas.getContext('webgl2', { antialias:false, alpha:false, depth:false, stencil:false });
-let glOk = !!gl && !!gl.getExtension('EXT_color_buffer_float');
-if (glOk) gl.getExtension('OES_texture_float_linear');
-if (!glOk) { $('glError').style.display = 'grid'; }
-
-function compile(type, src){
-  const s = gl.createShader(type);
-  gl.shaderSource(s, src); gl.compileShader(s);
-  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
-    throw new Error(gl.getShaderInfoLog(s) + '\n' + src);
-  return s;
-}
-function program(fsSrc){
-  const vs = compile(gl.VERTEX_SHADER, `#version 300 es
-    void main(){
-      vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
-      gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
-    }`);
-  const fs = compile(gl.FRAGMENT_SHADER, fsSrc);
-  const p = gl.createProgram();
-  gl.attachShader(p, vs); gl.attachShader(p, fs); gl.linkProgram(p);
-  if (!gl.getProgramParameter(p, gl.LINK_STATUS))
-    throw new Error(gl.getProgramInfoLog(p));
-  p.u = {};
-  const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
-  for (let i = 0; i < n; i++){
-    const info = gl.getActiveUniform(p, i);
-    p.u[info.name] = gl.getUniformLocation(p, info.name);
-  }
-  return p;
-}
-function tex2d(w, h, internal, format, type, filter){
-  const t = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D, t);
-  gl.texImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0, format, type, null);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  return t;
-}
-
-/* ---------------- shader sources ---------------- */
-const initFS = `#version 300 es
-precision highp float;
-uniform float uU;
-${GLSL_COMMON}
-layout(location=0) out vec4 o0;
-layout(location=1) out vec4 o1;
-layout(location=2) out vec4 o2;
-void main(){
-  vec2 u = vec2(-uU, 0.0);
-  o0 = vec4(feq(0,1.0,u), feq(1,1.0,u), feq(2,1.0,u), feq(3,1.0,u));
-  o1 = vec4(feq(4,1.0,u), feq(5,1.0,u), feq(6,1.0,u), feq(7,1.0,u));
-  o2 = vec4(feq(8,1.0,u), 1.0, u);
-}`;
-
-const stepFS = `#version 300 es
-precision highp float;
-uniform sampler2D uF0, uF1, uF2, uObs;
-uniform vec2 uRes;
-uniform float uU, uTau;
-${GLSL_COMMON}
-layout(location=0) out vec4 o0;
-layout(location=1) out vec4 o1;
-layout(location=2) out vec4 o2;
-float getf(ivec2 p, int i){
-  if (i == 8) return texelFetch(uF2, p, 0).x;
-  if (i < 4)  return texelFetch(uF0, p, 0)[i];
-  return texelFetch(uF1, p, 0)[i-4];
-}
-void writeEq(float rho, vec2 u, out vec4 a, out vec4 b, out vec4 c){
-  a = vec4(feq(0,rho,u), feq(1,rho,u), feq(2,rho,u), feq(3,rho,u));
-  b = vec4(feq(4,rho,u), feq(5,rho,u), feq(6,rho,u), feq(7,rho,u));
-  c = vec4(feq(8,rho,u), rho, u);
-}
-void main(){
-  ivec2 p = ivec2(gl_FragCoord.xy);
-  ivec2 R = ivec2(uRes);
-  if (texelFetch(uObs, p, 0).r > 0.5){ writeEq(1.0, vec2(0.0), o0, o1, o2); return; }
-  vec2 uin = vec2(-uU, 0.0);
-  if (p.x == R.x - 1 || p.y == 0 || p.y == R.y - 1){ writeEq(1.0, uin, o0, o1, o2); return; }
-  if (p.x == 0){
-    ivec2 q = ivec2(1, p.y);
-    o0 = texelFetch(uF0, q, 0);
-    o1 = texelFetch(uF1, q, 0);
-    o2 = texelFetch(uF2, q, 0);
-    return;
-  }
-  float f[9];
-  for (int i = 0; i < 9; i++){
-    ivec2 src = p - E[i];
-    if (texelFetch(uObs, src, 0).r > 0.5) f[i] = getf(p, OPP[i]);   // halfway bounce-back
-    else                                  f[i] = getf(src, i);      // pull streaming
-  }
-  float rho = 0.0; vec2 u = vec2(0.0);
-  for (int i = 0; i < 9; i++){ rho += f[i]; u += f[i] * vec2(E[i]); }
-  rho = max(rho, 1e-4);
-  u /= rho;
-  float sp = length(u);
-  if (sp > 0.25) u *= 0.25 / sp;
-  float fe[9];
-  for (int i = 0; i < 9; i++) fe[i] = feq(i, rho, u);
-  // Smagorinsky sub-grid model from non-equilibrium stress
-  float Pxx = 0.0, Pyy = 0.0, Pxy = 0.0;
-  for (int i = 0; i < 9; i++){
-    float fn = f[i] - fe[i];
-    vec2 ei = vec2(E[i]);
-    Pxx += ei.x*ei.x*fn; Pyy += ei.y*ei.y*fn; Pxy += ei.x*ei.y*fn;
-  }
-  float Q = sqrt(Pxx*Pxx + Pyy*Pyy + 2.0*Pxy*Pxy);
-  float tau = 0.5 * (uTau + sqrt(uTau*uTau + 0.76 * Q / rho));
-  float om = 1.0 / tau;
-  for (int i = 0; i < 9; i++) f[i] -= om * (f[i] - fe[i]);
-  o0 = vec4(f[0], f[1], f[2], f[3]);
-  o1 = vec4(f[4], f[5], f[6], f[7]);
-  o2 = vec4(f[8], rho, u);
-}`;
-
-const dyeFS = `#version 300 es
-precision highp float;
-uniform sampler2D uDye, uF2, uObs;
-uniform vec2 uRes;
-uniform float uDt;
-uniform int uStripe;
-out vec4 o;
-void main(){
-  ivec2 p = ivec2(gl_FragCoord.xy);
-  if (texelFetch(uObs, p, 0).r > 0.5){ o = vec4(0.0); return; }
-  vec2 vel = texelFetch(uF2, p, 0).zw;
-  vec2 pos = (vec2(p) + 0.5 - vel * uDt) / uRes;
-
-  // Semi-Lagrangian advection with linear filtering gradually blurs thin
-  // tracer bands.  Apply a restrained unsharp correction around the
-  // back-traced position to counter that numerical diffusion.
-  vec2 texel = 1.0 / uRes;
-  float c  = texture(uDye, pos).r * 0.99985;
-  float n1 = texture(uDye, pos + vec2( texel.x, 0.0)).r;
-  float n2 = texture(uDye, pos + vec2(-texel.x, 0.0)).r;
-  float n3 = texture(uDye, pos + vec2(0.0,  texel.y)).r;
-  float n4 = texture(uDye, pos + vec2(0.0, -texel.y)).r;
-  float blur = 0.25 * (n1 + n2 + n3 + n4);
-
-  float d = clamp(c + 0.28 * (c - blur), 0.0, 1.0) * 0.999995;
-
-  // Narrower inlet streaks: about one-tenth of the stripe spacing.
-  if (p.x >= int(uRes.x) - 3 &&
-      (p.y % uStripe) < max(uStripe / 10, 1)) d = 1.0;
-
-  o = vec4(d, 0.0, 0.0, 1.0);
-}`;
-
-const forceFS = `#version 300 es
-precision highp float;
-uniform sampler2D uF0, uF1, uF2, uObs;
-uniform vec2 uRes;
-uniform float uFloorY;
-${GLSL_COMMON}
-out vec4 o;
-float getf(ivec2 p, int i){
-  if (i == 8) return texelFetch(uF2, p, 0).x;
-  if (i < 4)  return texelFetch(uF0, p, 0)[i];
-  return texelFetch(uF1, p, 0)[i-4];
-}
-void main(){
-  ivec2 p = ivec2(gl_FragCoord.xy);
-  ivec2 R = ivec2(uRes);
-  if (p.x < 1 || p.x > R.x - 2 || p.y < 1 || p.y > R.y - 2 ||
-      texelFetch(uObs, p, 0).r > 0.5){ o = vec4(0.0); return; }
-  vec2 F = vec2(0.0);
-  for (int i = 1; i < 9; i++){
-    ivec2 n = p + E[i];
-    if (float(n.y) < uFloorY) continue;               // exclude ground plane
-    if (texelFetch(uObs, n, 0).r > 0.5)
-      F += 2.0 * getf(p, i) * vec2(E[i]);             // momentum exchange
-  }
-  o = vec4(F, 0.0, 0.0);
-}`;
-
-const reduceFS = `#version 300 es
-precision highp float;
-uniform sampler2D uSrc;
-uniform ivec2 uSrcSize;
-out vec4 o;
-void main(){
-  ivec2 q = ivec2(gl_FragCoord.xy) * 2;
-  vec4 s = vec4(0.0);
-  for (int dy = 0; dy < 2; dy++)
-  for (int dx = 0; dx < 2; dx++){
-    ivec2 c = q + ivec2(dx, dy);
-    if (c.x < uSrcSize.x && c.y < uSrcSize.y) s += texelFetch(uSrc, c, 0);
-  }
-  o = s;
-}`;
-
-const displayFS = `#version 300 es
-precision highp float;
-uniform sampler2D uF2, uDye, uObs;
-uniform vec2 uRes, uView;
-uniform int uMode;
-uniform float uU, uFloorY;
-out vec4 fc;
-vec2 velAt(ivec2 p){
-  p = clamp(p, ivec2(0), ivec2(uRes) - 1);
-  return texelFetch(uF2, p, 0).zw;
-}
-vec3 speedmap(float t){
-  vec3 c0 = vec3(0.03, 0.05, 0.10);
-  vec3 c1 = vec3(0.10, 0.30, 0.72);
-  vec3 c2 = vec3(0.18, 0.78, 0.84);
-  vec3 c3 = vec3(1.00, 0.72, 0.28);
-  vec3 c4 = vec3(1.00, 0.98, 0.92);
-  if (t < 0.25) return mix(c0, c1, t / 0.25);
-  if (t < 0.55) return mix(c1, c2, (t - 0.25) / 0.30);
-  if (t < 0.85) return mix(c2, c3, (t - 0.55) / 0.30);
-  return mix(c3, c4, (t - 0.85) / 0.15);
-}
-void main(){
-  vec2 uv = gl_FragCoord.xy / uView;
-  ivec2 p = ivec2(uv * uRes);
-  ivec2 R = ivec2(uRes);
-  float solid = texelFetch(uObs, p, 0).r;
-  vec3 col;
-  if (solid > 0.5){
-    bool edge = false;
-    ivec2 D[4] = ivec2[4](ivec2(1,0), ivec2(-1,0), ivec2(0,1), ivec2(0,-1));
-    for (int i = 0; i < 4; i++){
-      ivec2 n = clamp(p + D[i], ivec2(0), R - 1);
-      if (texelFetch(uObs, n, 0).r < 0.5) edge = true;
-    }
-    bool isFloor = float(p.y) < uFloorY;
-    col = isFloor ? vec3(0.13, 0.14, 0.17) : vec3(0.24, 0.26, 0.32);
-    if (edge) col = vec3(1.0, 0.71, 0.33);
-  } else if (uMode == 0){
-    float d = texture(uDye, uv).r;
-    vec3 bg = vec3(0.031, 0.039, 0.059);
-
-    // Display-only contrast curve: make dilute tracer visible without
-    // feeding that boost back into the simulated dye field.
-    float vis = pow(clamp(d, 0.0, 1.0), 0.62);
-    vec3 smoke = mix(
-      vec3(0.78, 0.90, 0.96),
-      vec3(1.00),
-      smoothstep(0.18, 0.85, vis)
-    );
-    col = bg + smoke * vis * 1.22;
-  } else if (uMode == 1){
-    float t = clamp(length(velAt(p)) / (uU * 1.6 + 1e-5), 0.0, 1.0);
-    col = speedmap(t);
-  } else if (uMode == 2){
-    float c = (velAt(p + ivec2(1,0)).y - velAt(p - ivec2(1,0)).y
-             - velAt(p + ivec2(0,1)).x + velAt(p - ivec2(0,1)).x) * 0.5;
-    float t = clamp(c / (uU * 0.65 + 1e-5), -1.0, 1.0);
-
-    vec3 base   = vec3(0.20, 0.22, 0.28);
-    vec3 posCol = vec3(1.00, 0.78, 0.36);
-    vec3 negCol = vec3(0.50, 0.84, 1.00);
-
-    col = base
-        + max( t, 0.0) * posCol * 1.25
-        + max(-t, 0.0) * negCol * 1.25;
-  } else {
-    float rhoSum = 0.0;
-    float weightSum = 0.0;
-    for (int dy = -1; dy <= 1; dy++){
-      for (int dx = -1; dx <= 1; dx++){
-        ivec2 q = clamp(p + ivec2(dx,dy), ivec2(0), R - 1);
-        if (texelFetch(uObs, q, 0).r < 0.5){
-          float wx = dx == 0 ? 2.0 : 1.0;
-          float wy = dy == 0 ? 2.0 : 1.0;
-          float w = wx * wy;
-          rhoSum += texelFetch(uF2, q, 0).y * w;
-          weightSum += w;
-        }
-      }
-    }
-    float rho = weightSum > 0.0 ? rhoSum / weightSum : 1.0;
-    float dp = rho - 1.0;
-    float range = max(0.012, 2.5 * uU * uU);
-    float t = clamp(dp / range, -1.0, 1.0);
-    float a = smoothstep(0.06, 1.0, abs(t));
-    t = sign(t) * a;
-
-    vec3 lowP    = vec3(0.18, 0.48, 1.00);
-    vec3 neutral = vec3(0.92, 0.93, 0.95);
-    vec3 highP   = vec3(1.00, 0.38, 0.16);
-
-    col = t < 0.0
-      ? mix(neutral, lowP, -t)
-      : mix(neutral, highP, t);
-  }
-
-  fc = vec4(col, 1.0);
-}`;
-
-/* ---------------- GL resources ---------------- */
-let progInit, progStep, progDye, progForce, progReduce, progDisplay;
-let vao, fTex = [], fFbo = [], dyeTex = [], dyeFbo = [], obsTex;
-let chain = []; // [{tex, fbo, w, h}]
-let cur = 0, dyeCur = 0;
-
-function buildPrograms(){
-  progInit    = program(initFS);
-  progStep    = program(stepFS);
-  progDye     = program(dyeFS);
-  progForce   = program(forceFS);
-  progReduce  = program(reduceFS);
-  progDisplay = program(displayFS);
-  vao = gl.createVertexArray();
-  gl.bindVertexArray(vao);
-}
-
-function destroySim(){
-  for (const set of fTex) for (const t of set) gl.deleteTexture(t);
-  for (const f of fFbo) gl.deleteFramebuffer(f);
-  for (const t of dyeTex) gl.deleteTexture(t);
-  for (const f of dyeFbo) gl.deleteFramebuffer(f);
-  for (const c of chain){ gl.deleteTexture(c.tex); gl.deleteFramebuffer(c.fbo); }
-  if (obsTex) gl.deleteTexture(obsTex);
-  fTex = []; fFbo = []; dyeTex = []; dyeFbo = []; chain = []; obsTex = null;
-  cur = 0; dyeCur = 0;
-}
-
-function allocSim(){
-  for (let s = 0; s < 2; s++){
-    const set = [
-      tex2d(W, H, gl.RGBA32F, gl.RGBA, gl.FLOAT, gl.NEAREST),
-      tex2d(W, H, gl.RGBA32F, gl.RGBA, gl.FLOAT, gl.NEAREST),
-      tex2d(W, H, gl.RGBA32F, gl.RGBA, gl.FLOAT, gl.NEAREST),
-    ];
-    const fbo = gl.createFramebuffer();
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-    for (let i = 0; i < 3; i++)
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0 + i, gl.TEXTURE_2D, set[i], 0);
-    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2]);
-    fTex.push(set); fFbo.push(fbo);
-  }
-
-  for (let s = 0; s < 2; s++){
-    const t = tex2d(W, H, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR);
-    const fbo = gl.createFramebuffer();
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
-    dyeTex.push(t); dyeFbo.push(fbo);
-  }
-
-  obsTex = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D, obsTex);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, W, H, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-
-  // reduction chain: level 0 holds the force field
-  let w = W, h = H;
-  while (true){
-    const t = tex2d(w, h, gl.RGBA32F, gl.RGBA, gl.FLOAT, gl.NEAREST);
-    const fbo = gl.createFramebuffer();
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
-    chain.push({ tex:t, fbo, w, h });
-    if (w === 1 && h === 1) break;
-    w = Math.max(1, Math.ceil(w / 2));
-    h = Math.max(1, Math.ceil(h / 2));
-  }
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-}
-
-function bindTex(unit, tex){ gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, tex); }
-
-/* Rebuild the simulation at a new lattice size. Shapes, ink, and the floor
-   scale with it; the flow field restarts from freestream. */
-function setResolution(key){
-  const r = RES[key];
-  if (!r) return;
-  if (r.w !== W){
-    const fx = r.w / W;
-    for (const sh of state.shapes){ sh.x *= fx; sh.y *= fx; sh.s *= fx; }
-    // rescale freehand ink
-    const tmp = document.createElement('canvas');
-    tmp.width = W; tmp.height = H;
-    tmp.getContext('2d').drawImage(paintCanvas, 0, 0);
-    W = r.w; H = r.h;
-    paintCanvas.width = W; paintCanvas.height = H;
-    paintCtx.imageSmoothingEnabled = false;
-    paintCtx.drawImage(tmp, 0, 0, W, H);
-    obsCanvas.width = W; obsCanvas.height = H;
-    destroySim();
-    allocSim();
-  }
-  FLOORR = Math.max(6, Math.round(H * 0.04));
-  SUBv = Math.round(10 * W / 512);
-  rasterizeObstacles();
-  obsDirty = false;
-  initFluid();
-  const lbl = document.getElementById('latticeLabel');
-  if (lbl) lbl.textContent = `${W}×${H} lattice`;
-}
-
-/* One-shot startup benchmark at the standard lattice: time a burst of LBM
-   steps, project the per-frame cost of each preset, pick the largest that
-   fits a ~9 ms sim budget. Manual selection overrides. */
-function benchmarkPick(){
-  const N = 40;
-  gl.finish();
-  const t0 = performance.now();
-  const savedSub = SUBv;
-  SUBv = N;
-  stepFluid();
-  SUBv = savedSub;
-  gl.finish();
-  const perStep = (performance.now() - t0) / N;   // ms per step at current W×H
-  const baseArea = W * H;
-  let pick = 'low';
-  for (const key of ['standard', 'high', 'ultra', 'extreme', 'plaid']){
-    const r = RES[key];
-    const cost = perStep * (r.w * r.h / baseArea) * Math.round(10 * r.w / 512);
-    if (cost < 9) pick = key;
-  }
-  return pick;
-}
-
-function initFluid(){
-  gl.useProgram(progInit);
-  gl.viewport(0, 0, W, H);
-  for (let s = 0; s < 2; s++){
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fFbo[s]);
-    gl.uniform1f(progInit.u.uU, state.U);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
-  }
-  for (let s = 0; s < 2; s++){
-    gl.bindFramebuffer(gl.FRAMEBUFFER, dyeFbo[s]);
-    gl.clearColor(0, 0, 0, 1);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-  }
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  state.cd = null; state.cl = null;
-}
-
-function stepFluid(){
-  gl.useProgram(progStep);
-  gl.viewport(0, 0, W, H);
-  gl.uniform1f(progStep.u.uU, state.U);
-  gl.uniform1f(progStep.u.uTau, TAU0);
-  gl.uniform2f(progStep.u.uRes, W, H);
-  gl.uniform1i(progStep.u.uF0, 0);
-  gl.uniform1i(progStep.u.uF1, 1);
-  gl.uniform1i(progStep.u.uF2, 2);
-  gl.uniform1i(progStep.u.uObs, 3);
-  bindTex(3, obsTex);
-  for (let s = 0; s < SUBv; s++){
-    const src = cur, dst = 1 - cur;
-    bindTex(0, fTex[src][0]); bindTex(1, fTex[src][1]); bindTex(2, fTex[src][2]);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fFbo[dst]);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
-    cur = dst;
-  }
-}
-
-function stepDye(){
-  gl.useProgram(progDye);
-  gl.viewport(0, 0, W, H);
-  gl.uniform2f(progDye.u.uRes, W, H);
-  gl.uniform1f(progDye.u.uDt, SUBv);
-  gl.uniform1i(progDye.u.uStripe, Math.max(10, Math.round(H / 14)));
-  gl.uniform1i(progDye.u.uDye, 0);
-  gl.uniform1i(progDye.u.uF2, 1);
-  gl.uniform1i(progDye.u.uObs, 2);
-  bindTex(0, dyeTex[dyeCur]);
-  bindTex(1, fTex[cur][2]);
-  bindTex(2, obsTex);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, dyeFbo[1 - dyeCur]);
-  gl.drawArrays(gl.TRIANGLES, 0, 3);
-  dyeCur = 1 - dyeCur;
-}
-
-const forcePx = new Float32Array(4);
-function measureForces(){
-  gl.useProgram(progForce);
-  gl.viewport(0, 0, W, H);
-  gl.uniform2f(progForce.u.uRes, W, H);
-  gl.uniform1f(progForce.u.uFloorY, state.floor ? FLOORR : 0);
-  gl.uniform1i(progForce.u.uF0, 0);
-  gl.uniform1i(progForce.u.uF1, 1);
-  gl.uniform1i(progForce.u.uF2, 2);
-  gl.uniform1i(progForce.u.uObs, 3);
-  bindTex(0, fTex[cur][0]); bindTex(1, fTex[cur][1]); bindTex(2, fTex[cur][2]); bindTex(3, obsTex);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, chain[0].fbo);
-  gl.drawArrays(gl.TRIANGLES, 0, 3);
-
-  gl.useProgram(progReduce);
-  gl.uniform1i(progReduce.u.uSrc, 0);
-  for (let i = 1; i < chain.length; i++){
-    gl.uniform2i(progReduce.u.uSrcSize, chain[i-1].w, chain[i-1].h);
-    bindTex(0, chain[i-1].tex);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, chain[i].fbo);
-    gl.viewport(0, 0, chain[i].w, chain[i].h);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
-  }
-  try {
-    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, forcePx);
-  } catch (e) { state.metersOk = false; return; }
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-
-  const q = 0.5 * state.U * state.U * Math.max(state.frontalH, 1);
-  if (state.frontalH < 2 || state.U < 0.005 || q <= 0){ state.cd = null; state.cl = null; return; }
-  const cd = -forcePx[0] / q;   // flow is -x; drag acts in -x on the body
-  const cl =  forcePx[1] / q;
-  const a = 0.10;
-  state.cd = state.cd == null ? cd : state.cd + a * (cd - state.cd);
-  state.cl = state.cl == null ? cl : state.cl + a * (cl - state.cl);
-}
-
-function draw(){
-  const vw = glCanvas.width, vh = glCanvas.height;
-  gl.useProgram(progDisplay);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  gl.viewport(0, 0, vw, vh);
-  gl.uniform2f(progDisplay.u.uRes, W, H);
-  gl.uniform2f(progDisplay.u.uView, vw, vh);
-  gl.uniform1i(progDisplay.u.uMode, state.mode);
-  gl.uniform1f(progDisplay.u.uU, state.U);
-  gl.uniform1f(progDisplay.u.uFloorY, state.floor ? FLOORR : 0);
-  gl.uniform1i(progDisplay.u.uF2, 0);
-  gl.uniform1i(progDisplay.u.uDye, 1);
-  gl.uniform1i(progDisplay.u.uObs, 2);
-  bindTex(0, fTex[cur][2]); bindTex(1, dyeTex[dyeCur]); bindTex(2, obsTex);
-  gl.drawArrays(gl.TRIANGLES, 0, 3);
-}
-
-/* ============================== obstacle rasterization ============================== */
-const obsCanvas = document.createElement('canvas');
-obsCanvas.width = W; obsCanvas.height = H;
-const obsCtx = obsCanvas.getContext('2d', { willReadFrequently:true });
-
-const paintCanvas = document.createElement('canvas');
-paintCanvas.width = W; paintCanvas.height = H;
-const paintCtx = paintCanvas.getContext('2d');
-
-let obsDirty = true;
-
-/* NACA 4-digit geometry in local units (chord = 2, LE at x=+1 facing the flow).
-   Half-thickness and camber returned in local units. */
-function nacaT(xc, t){
-  return 2 * 5 * t * (0.2969*Math.sqrt(xc) - 0.1260*xc - 0.3516*xc*xc
-                    + 0.2843*xc*xc*xc - 0.1036*xc*xc*xc*xc);
-}
-function nacaC(xc, m, p){
-  if (m === 0) return 0;
-  const yc = xc < p
-    ? m / (p*p) * (2*p*xc - xc*xc)
-    : m / ((1-p)*(1-p)) * ((1 - 2*p) + 2*p*xc - xc*xc);
-  return 2 * yc;
-}
-
-/* Airfoil catalog. Camber is positive-up, so as drawn these produce LIFT;
-   flip the body for downforce. */
-const FOILS = {
-  n0016:  { m:0.00, p:0.40, t:0.16, label:'NACA 0016 · symmetric' },
-  n0030:  { m:0.00, p:0.40, t:0.30, label:'NACA 0030 · thick fairing / strut' },
-  n2412:  { m:0.02, p:0.40, t:0.12, label:'NACA 2412 · low drag, mild lift' },
-  n4412:  { m:0.04, p:0.40, t:0.12, label:'NACA 4412 · efficient lift' },
-  n9412:  { m:0.09, p:0.40, t:0.12, label:'NACA 9412 · high lift' },
-  race:   { m:0.13, p:0.45, t:0.13, label:'Race wing · max camber' },
-};
-
-function foilPath(ctx, geo){
-  ctx.beginPath();
-  const N = 34;
-  for (let i = 0; i <= N; i++){          // top surface, LE (x=+1) to TE (x=-1)
-    const xc = i / N, x = 1 - 2 * xc;
-    const y = nacaC(xc, geo.m, geo.p) + nacaT(xc, geo.t);
-    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-  }
-  for (let i = N; i >= 0; i--){          // bottom surface back
-    const xc = i / N, x = 1 - 2 * xc;
-    ctx.lineTo(x, nacaC(xc, geo.m, geo.p) - nacaT(xc, geo.t));
-  }
-  ctx.closePath();
-}
-
-const WEDGE = [[1,-0.5], [-1,0.5], [-1,-0.5]];
-
-/* Generic fastback car silhouette, ground line at y=-0.32, nose at x=+1 */
-const CAR_PTS = [
-  [ 1.00, -0.32], [ 1.00, -0.10], [ 0.96,  0.08], [ 0.86,  0.15],
-  [ 0.55,  0.19], [ 0.28,  0.33], [-0.05,  0.36], [-0.45,  0.34],
-  [-0.85,  0.10], [-1.00,  0.06], [-1.00, -0.32],
-];
-function pip(px, py, pts){
-  let inside = false;
-  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++){
-    const [xi, yi] = pts[i], [xj, yj] = pts[j];
-    if ((yi > py) !== (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi)
-      inside = !inside;
-  }
-  return inside;
-}
-function polyPath(ctx, pts){
-  ctx.beginPath();
-  pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
-  ctx.closePath();
-}
-
-function drawShapePath(ctx, sh){
-  switch (sh.type){
-    case 'circle': ctx.beginPath(); ctx.arc(0, 0, 1, 0, Math.PI * 2); break;
-    case 'rect':   ctx.beginPath(); ctx.rect(-1, -0.62, 2, 1.24); break;
-    case 'plate':  ctx.beginPath(); ctx.rect(-1, -0.05, 2, 0.10); break;
-    case 'wedge':  polyPath(ctx, WEDGE); break;
-    case 'car':    polyPath(ctx, CAR_PTS); break;
-    case 'foil':   foilPath(ctx, FOILS[sh.foil]); break;
-  }
-}
-
-function rasterizeObstacles(){
-  obsCtx.setTransform(1, 0, 0, 1, 0, 0);
-  obsCtx.clearRect(0, 0, W, H);
-  obsCtx.fillStyle = '#fff';
-  // ground plane (lattice y ∈ [0, FLOORR))
-  if (state.floor){
-    obsCtx.setTransform(1, 0, 0, -1, 0, H);
-    obsCtx.fillRect(0, 0, W, FLOORR);
-  }
-  // freehand ink (same bitmap convention)
-  obsCtx.setTransform(1, 0, 0, 1, 0, 0);
-  obsCtx.drawImage(paintCanvas, 0, 0);
-  // selectable primitives and imported SVG bitmap bodies
-  for (const sh of state.shapes){
-    obsCtx.setTransform(1, 0, 0, -1, 0, H);
-    obsCtx.translate(sh.x, sh.y);
-    obsCtx.rotate(sh.rot);
-    obsCtx.scale(sh.s, sh.s * (sh.flip ? -1 : 1));
-    if (sh.type === 'bitmap'){
-      // Source-image Y runs downward; draw with a negative local height so
-      // the body's local coordinates retain positive-Y-up semantics.
-      obsCtx.drawImage(sh.maskCanvas, -1, sh.aspect, 2, -2 * sh.aspect);
-    } else {
-      drawShapePath(obsCtx, sh);
-      obsCtx.fill();
-    }
-  }
-  obsCtx.setTransform(1, 0, 0, 1, 0, 0);
-
-  // upload
-  gl.bindTexture(gl.TEXTURE_2D, obsTex);
-  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, obsCanvas);
-  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-
-  // frontal height + centroid of merged body profile (ground plane excluded)
-  const img = obsCtx.getImageData(0, 0, W, H).data;
-  const floorRow = state.floor ? H - FLOORR : H;   // device rows below this are floor
-  let hCount = 0, mSum = 0, mx = 0, my = 0;
-  for (let row = 0; row < floorRow; row++){
-    const base = row * W * 4;
-    let any = false;
-    for (let x = 0; x < W; x++){
-      if (img[base + x * 4 + 3] > 127){
-        any = true;
-        mSum++;
-        mx += x;
-        my += H - 1 - row;   // device row → lattice y
-      }
-    }
-    if (any) hCount++;
-  }
-  state.frontalH = hCount;
-  state.com = mSum > 0 ? [mx / mSum, my / mSum] : null;
-}
-
-/* ============================== shapes & interaction ============================== */
-function addShape(type, foil){
-  const s = { circle:22, rect:26, wedge:28, plate:34, car:52, foil:44 }[type];
-  const n = state.shapes.length;
-  state.shapes.push({
-    id: state.nextId++, type, foil: foil || 'n0016',
-    x: W * 0.5 + ((n % 3) - 1) * 30,
-    y: H * 0.5 + ((n % 2) ? -20 : 14),
-    s, rot: 0, flip: false,
-  });
-  state.sel = state.shapes.length - 1;
-  obsDirty = true;
-  drawOverlay();
-}
-
-function localPoint(sh, lx, ly){
-  const dx = lx - sh.x, dy = ly - sh.y;
-  const c = Math.cos(-sh.rot), s = Math.sin(-sh.rot);
-  return [(dx * c - dy * s) / sh.s, (dx * s + dy * c) / sh.s];
-}
-function pointInTri(p, a, b, c){
-  const sgn = (p1, p2, p3) => (p1[0]-p3[0])*(p2[1]-p3[1]) - (p2[0]-p3[0])*(p1[1]-p3[1]);
-  const d1 = sgn(p, a, b), d2 = sgn(p, b, c), d3 = sgn(p, c, a);
-  const neg = (d1 < 0) || (d2 < 0) || (d3 < 0);
-  const pos = (d1 > 0) || (d2 > 0) || (d3 > 0);
-  return !(neg && pos);
-}
-function hitShape(sh, lx, ly){
-  let [qx, qy] = localPoint(sh, lx, ly);
-  if (sh.flip) qy = -qy;
-  switch (sh.type){
-    case 'circle': return qx*qx + qy*qy <= 1;
-    case 'rect':   return Math.abs(qx) <= 1 && Math.abs(qy) <= 0.62;
-    case 'plate':  return Math.abs(qx) <= 1 && Math.abs(qy) <= 0.14; // padded for grabbing
-    case 'wedge':  return pointInTri([qx, qy], WEDGE[0], WEDGE[1], WEDGE[2]);
-    case 'car':    return pip(qx, qy, CAR_PTS);
-    case 'bitmap':{
-      if (Math.abs(qx) > 1 || Math.abs(qy) > sh.aspect) return false;
-      const px = Math.min(sh.maskW - 1, Math.max(0,
-        Math.floor((qx + 1) * 0.5 * sh.maskW)));
-      const py = Math.min(sh.maskH - 1, Math.max(0,
-        Math.floor((sh.aspect - qy) / (2 * sh.aspect) * sh.maskH)));
-      return sh.maskAlpha[py * sh.maskW + px] > 8;
-    }
-    case 'foil':{
-      if (Math.abs(qx) > 1) return false;
-      const g = FOILS[sh.foil], xc = (1 - qx) / 2;
-      const yc = nacaC(xc, g.m, g.p), yt = Math.max(nacaT(xc, g.t), 0.06); // padded
-      return qy >= yc - yt && qy <= yc + yt;
-    }
-  }
-  return false;
-}
-function shapePoint(sh, lx, ly){   // local → lattice
-  const c = Math.cos(sh.rot), s = Math.sin(sh.rot);
-  return [sh.x + (lx * c - ly * s) * sh.s, sh.y + (lx * s + ly * c) * sh.s];
-}
-const SCALE_H = [1.3, -1.3], ROT_H = [0, 1.7];  // handle positions, local units
-
-/* Handle positions in css px: pushed to a minimum distance from the body
-   center so they stay grabbable on small bodies, and clamped into the stage. */
-function handleCss(sh){
-  const r = stage.getBoundingClientRect();
-  const c = latToCss(sh.x, sh.y);
-  const minD = COARSE ? 56 : 30;
-  const place = local => {
-    let p = latToCss(...shapePoint(sh, local[0], local[1]));
-    let dx = p[0] - c[0], dy = p[1] - c[1];
-    const d = Math.hypot(dx, dy) || 1;
-    if (d < minD){ dx *= minD / d; dy *= minD / d; p = [c[0] + dx, c[1] + dy]; }
-    const pad = HANDLE_R + 4;
-    return [
-      Math.min(r.width - pad, Math.max(pad, p[0])),
-      Math.min(r.height - pad, Math.max(pad, p[1])),
-    ];
-  };
-  return { scale: place(SCALE_H), rot: place(ROT_H) };
-}
-
-/* lattice ↔ screen */
-function latToCss(lx, ly){
-  const r = stage.getBoundingClientRect();
-  return [lx / W * r.width, (1 - ly / H) * r.height];
-}
-function evtToLat(e){
-  const r = stage.getBoundingClientRect();
-  return [(e.clientX - r.left) / r.width * W, (1 - (e.clientY - r.top) / r.height) * H];
-}
-
-/* force vectors from the profile's center of mass */
-function arrow(x0, y0, x1, y1, color){
-  const dx = x1 - x0, dy = y1 - y0;
-  const len = Math.hypot(dx, dy);
-  if (len < 2) return;
-  const ux = dx / len, uy = dy / len;
-  const head = Math.min(10, len * 0.4);
-  uiCtx.strokeStyle = color;
-  uiCtx.fillStyle = color;
-  uiCtx.lineWidth = 2.5;
-  uiCtx.lineCap = 'round';
-  uiCtx.beginPath();
-  uiCtx.moveTo(x0, y0);
-  uiCtx.lineTo(x1 - ux * head * 0.6, y1 - uy * head * 0.6);
-  uiCtx.stroke();
-  uiCtx.beginPath();
-  uiCtx.moveTo(x1, y1);
-  uiCtx.lineTo(x1 - ux * head - uy * head * 0.45, y1 - uy * head + ux * head * 0.45);
-  uiCtx.lineTo(x1 - ux * head + uy * head * 0.45, y1 - uy * head - ux * head * 0.45);
-  uiCtx.closePath();
-  uiCtx.fill();
-}
-
-function drawForceVectors(rectW){
-  if (!state.com || state.cd == null || !state.metersOk) return;
-  const c = latToCss(state.com[0], state.com[1]);
-  const PX_PER_COEF = rectW * 0.06;                 // css px per unit coefficient
-  const cap = rectW * 0.35;
-  const dLen = Math.min(Math.abs(state.cd) * PX_PER_COEF, cap);
-  const lLen = Math.min(Math.abs(state.cl) * PX_PER_COEF, cap);
-
-  // center-of-mass marker
-  uiCtx.strokeStyle = 'rgba(232,234,240,0.85)';
-  uiCtx.lineWidth = 1.5;
-  uiCtx.beginPath(); uiCtx.arc(c[0], c[1], 4, 0, Math.PI * 2); uiCtx.stroke();
-  uiCtx.beginPath();
-  uiCtx.moveTo(c[0] - 7, c[1]); uiCtx.lineTo(c[0] + 7, c[1]);
-  uiCtx.moveTo(c[0], c[1] - 7); uiCtx.lineTo(c[0], c[1] + 7);
-  uiCtx.stroke();
-
-  // drag: horizontal, downstream is -x (left) for positive Cd
-  const dSign = state.cd >= 0 ? -1 : 1;
-  arrow(c[0], c[1], c[0] + dSign * dLen, c[1], '#ffb454');
-  // lift: vertical, screen y is down so positive Cl points up
-  const lSign = state.cl >= 0 ? -1 : 1;
-  arrow(c[0], c[1], c[0], c[1] + lSign * lLen, '#7bd8f0');
-
-  uiCtx.font = '10px ui-monospace, Menlo, monospace';
-  uiCtx.fillStyle = '#ffb454';
-  if (dLen > 14) uiCtx.fillText('D', c[0] + dSign * (dLen + 8) - 3, c[1] + 3.5);
-  uiCtx.fillStyle = '#7bd8f0';
-  if (lLen > 14) uiCtx.fillText('L', c[0] - 3, c[1] + lSign * (lLen + 10) + 3.5);
-}
-
-/* selection overlay */
-function drawOverlay(){
-  const r = stage.getBoundingClientRect();
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  if (uiCanvas.width !== Math.round(r.width * dpr)){
-    uiCanvas.width = Math.round(r.width * dpr);
-    uiCanvas.height = Math.round(r.height * dpr);
-  }
-  uiCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  uiCtx.clearRect(0, 0, r.width, r.height);
-
-  drawForceVectors(r.width);
-
-  const sh = state.shapes[state.sel];
-  if (!sh || state.tool !== 'select') return;
-
-  const ext = sh.type === 'bitmap'
-    ? [1, sh.aspect]
-    : { circle:[1,1], rect:[1,0.62], plate:[1,0.14], wedge:[1,0.5],
-        car:[1,0.4], foil:[1,0.45] }[sh.type];
-  const corners = [[-ext[0],-ext[1]],[ext[0],-ext[1]],[ext[0],ext[1]],[-ext[0],ext[1]]]
-    .map(p => latToCss(...shapePoint(sh, p[0], p[1])));
-  uiCtx.strokeStyle = 'rgba(255,180,84,0.9)';
-  uiCtx.setLineDash([5, 4]);
-  uiCtx.lineWidth = 1;
-  uiCtx.beginPath();
-  corners.forEach((p, i) => i ? uiCtx.lineTo(p[0], p[1]) : uiCtx.moveTo(p[0], p[1]));
-  uiCtx.closePath();
-  uiCtx.stroke();
-  uiCtx.setLineDash([]);
-
-  const hc = handleCss(sh);
-  const cCss = latToCss(sh.x, sh.y);
-  uiCtx.strokeStyle = 'rgba(255,180,84,0.35)';
-  uiCtx.lineWidth = 1;
-  for (const p of [hc.scale, hc.rot]){
-    uiCtx.beginPath();
-    uiCtx.moveTo(cCss[0], cCss[1]);
-    uiCtx.lineTo(p[0], p[1]);
-    uiCtx.stroke();
-  }
-
-  // scale handle: square
-  uiCtx.fillStyle = 'rgba(255,180,84,0.25)';
-  uiCtx.strokeStyle = '#ffb454';
-  uiCtx.lineWidth = 2;
-  uiCtx.fillRect(hc.scale[0] - HANDLE_R, hc.scale[1] - HANDLE_R, HANDLE_R * 2, HANDLE_R * 2);
-  uiCtx.strokeRect(hc.scale[0] - HANDLE_R, hc.scale[1] - HANDLE_R, HANDLE_R * 2, HANDLE_R * 2);
-
-  // rotate handle: circle with arc glyph
-  uiCtx.beginPath();
-  uiCtx.arc(hc.rot[0], hc.rot[1], HANDLE_R, 0, Math.PI * 2);
-  uiCtx.fill();
-  uiCtx.stroke();
-  uiCtx.beginPath();
-  uiCtx.arc(hc.rot[0], hc.rot[1], HANDLE_R * 0.5, -Math.PI * 0.25, Math.PI, false);
-  uiCtx.stroke();
-}
-
-/* pointer interaction */
-let drag = null;    // {kind:'move'|'scale'|'rot'|'paint', ...}
-let gesture = null; // two-finger pinch/twist on the selected body
-const pointers = new Map(); // pointerId -> [cssX, cssY]
-
-function evtToCss(e){
-  const r = stage.getBoundingClientRect();
-  return [e.clientX - r.left, e.clientY - r.top];
-}
-function gestureMetrics(){
-  const [a, b] = [...pointers.values()];
-  return {
-    d: Math.hypot(b[0] - a[0], b[1] - a[1]),
-    a: Math.atan2(b[1] - a[1], b[0] - a[0]),
-  };
-}
-
-stage.addEventListener('pointerdown', e => {
-  if (!glOk) return;
-  stage.setPointerCapture(e.pointerId);
-  stage.focus({ preventScroll:true });
-  pointers.set(e.pointerId, evtToCss(e));
-
-  // second finger with a selected body: pinch = scale, twist = rotate
-  if (pointers.size === 2 && state.tool === 'select' && state.sel >= 0){
-    const sh = state.shapes[state.sel];
-    const m = gestureMetrics();
-    gesture = { sh, d0: m.d || 1, a0: m.a, s0: sh.s, rot0: sh.rot };
-    drag = null;
-    return;
-  }
-  if (pointers.size > 1) return;
-
-  const [lx, ly] = evtToLat(e);
-
-  if (state.tool === 'draw' || state.tool === 'erase'){
-    drag = { kind:'paint', last:[lx, ly] };
-    paintStroke(lx, ly, lx, ly);
-    return;
-  }
-  const sh = state.shapes[state.sel];
-  if (sh){
-    const hc = handleCss(sh);
-    const [px, py] = evtToCss(e);
-    if (Math.hypot(hc.scale[0] - px, hc.scale[1] - py) < HIT_R){
-      drag = { kind:'scale', sh }; return;
-    }
-    if (Math.hypot(hc.rot[0] - px, hc.rot[1] - py) < HIT_R){
-      drag = { kind:'rot', sh }; return;
-    }
-  }
-  for (let i = state.shapes.length - 1; i >= 0; i--){
-    if (hitShape(state.shapes[i], lx, ly)){
-      state.sel = i;
-      const s = state.shapes[i];
-      drag = { kind:'move', sh:s, ox: lx - s.x, oy: ly - s.y };
-      drawOverlay();
-      return;
-    }
-  }
-  state.sel = -1;
-  drawOverlay();
-});
-
-stage.addEventListener('pointermove', e => {
-  if (pointers.has(e.pointerId)) pointers.set(e.pointerId, evtToCss(e));
-
-  if (gesture && pointers.size >= 2){
-    const m = gestureMetrics();
-    const sh = gesture.sh;
-    sh.s = Math.min(110, Math.max(4, gesture.s0 * m.d / gesture.d0));
-    // screen y is down, lattice rotation is CCW-positive: invert the delta
-    sh.rot = gesture.rot0 - (m.a - gesture.a0);
-    obsDirty = true;
-    drawOverlay();
-    return;
-  }
-
-  if (!drag) return;
-  const [lx, ly] = evtToLat(e);
-  if (drag.kind === 'paint'){
-    paintStroke(drag.last[0], drag.last[1], lx, ly);
-    drag.last = [lx, ly];
-    return;
-  }
-  const sh = drag.sh;
-  if (drag.kind === 'move'){
-    sh.x = Math.min(W - 4, Math.max(4, lx - drag.ox));
-    sh.y = Math.min(H - 4, Math.max(4, ly - drag.oy));
-  } else if (drag.kind === 'scale'){
-    const d = Math.hypot(lx - sh.x, ly - sh.y);
-    sh.s = Math.min(110, Math.max(4, d / Math.hypot(SCALE_H[0], SCALE_H[1])));
-  } else if (drag.kind === 'rot'){
-    sh.rot = Math.atan2(ly - sh.y, lx - sh.x) - Math.PI / 2;
-  }
-  obsDirty = true;
-  drawOverlay();
-});
-
-['pointerup', 'pointercancel'].forEach(ev =>
-  stage.addEventListener(ev, e => {
-    pointers.delete(e.pointerId);
-    if (pointers.size < 2) gesture = null;
-    if (pointers.size === 0) drag = null;
-  }));
-
-function paintStroke(x0, y0, x1, y1){
-  const ctx = paintCtx;
-  const bs = state.brush * W / 512;   // brush size tracks lattice density
-  ctx.setTransform(1, 0, 0, -1, 0, H);
-  ctx.globalCompositeOperation = state.tool === 'erase' ? 'destination-out' : 'source-over';
-  ctx.strokeStyle = '#fff';
-  ctx.fillStyle = '#fff';
-  ctx.lineWidth = bs * 2;
-  ctx.lineCap = 'round';
-  ctx.beginPath();
-  ctx.moveTo(x0, y0);
-  ctx.lineTo(x1, y1);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.arc(x1, y1, bs, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.globalCompositeOperation = 'source-over';
-  obsDirty = true;
-}
-
-/* keyboard control of selected shape */
-stage.addEventListener('keydown', e => {
-  const sh = state.shapes[state.sel];
-  if (!sh) return;
-  const step = e.shiftKey ? 8 : 2;
-  let used = true;
-  switch (e.key){
-    case 'ArrowLeft':  sh.x -= step; break;
-    case 'ArrowRight': sh.x += step; break;
-    case 'ArrowUp':    sh.y += step; break;
-    case 'ArrowDown':  sh.y -= step; break;
-    case 'r':          sh.rot += Math.PI / 36; break;
-    case 'R':          sh.rot -= Math.PI / 36; break;
-    case 'f': case 'F': flipSelected(); return;
-    case '+': case '=': sh.s = Math.min(110, sh.s * 1.1); break;
-    case '-': case '_': sh.s = Math.max(4, sh.s / 1.1); break;
-    case 'Delete': case 'Backspace': deleteSelected(); break;
-    default: used = false;
-  }
-  if (used){
-    e.preventDefault();
-    obsDirty = true;
-    drawOverlay();
-  }
-});
-
-function deleteSelected(){
-  if (state.sel < 0) return;
-  state.shapes.splice(state.sel, 1);
-  state.sel = -1;
-  obsDirty = true;
-  drawOverlay();
-}
-
-/* ============================== UI wiring ============================== */
-function setTool(t){
-  state.tool = t;
-  $('toolSelect').setAttribute('aria-pressed', t === 'select');
-  $('toolDraw').setAttribute('aria-pressed', t === 'draw');
-  $('toolErase').setAttribute('aria-pressed', t === 'erase');
-  stage.style.cursor = t === 'select' ? 'default' : 'crosshair';
-  drawOverlay();
-}
-$('toolSelect').onclick = () => setTool('select');
-$('toolDraw').onclick   = () => setTool('draw');
-$('toolErase').onclick  = () => setTool('erase');
-
-$('addCircle').onclick = () => addShape('circle');
-$('addRect').onclick   = () => addShape('rect');
-$('addWedge').onclick  = () => addShape('wedge');
-$('addPlate').onclick  = () => addShape('plate');
-$('addCar').onclick    = () => addShape('car');
-
-const foilSel = $('foilSel');
-for (const [key, g] of Object.entries(FOILS)){
-  const o = document.createElement('option');
-  o.value = key;
-  o.textContent = g.label;
-  foilSel.appendChild(o);
-}
-$('addFoil').onclick = () => addShape('foil', foilSel.value);
-
-/* Import an SVG as a selectable bitmap body. The SVG is rendered into a
-   temporary canvas, cropped to its visible bounds, converted to a white
-   alpha mask, and stored in state.shapes so it can be moved and transformed. */
-const svgFile = $('svgFile');
-const svgStatus = $('svgStatus');
-
-svgFile.addEventListener('change', async event => {
-  const file = event.target.files?.[0];
-  if (!file) return;
-
-  svgStatus.textContent = `Loading ${file.name}…`;
-
-  try {
-    const svgText = await file.text();
-    const parser = new DOMParser();
-    const svgDoc = parser.parseFromString(svgText, 'image/svg+xml');
-    const parseError = svgDoc.querySelector('parsererror');
-    if (parseError) throw new Error('The selected file is not valid SVG XML.');
-
-    const root = svgDoc.documentElement;
-    if (root.localName !== 'svg') throw new Error('The selected file has no SVG root element.');
-
-    if (!root.getAttribute('xmlns'))
-      root.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-
-    const vb = root.viewBox?.baseVal;
-    if ((!root.getAttribute('width') || !root.getAttribute('height')) && vb && vb.width > 0 && vb.height > 0){
-      root.setAttribute('width', String(vb.width));
-      root.setAttribute('height', String(vb.height));
-    }
-
-    root.querySelectorAll('script, foreignObject').forEach(node => node.remove());
-    root.querySelectorAll('*').forEach(node => {
-      for (const attr of [...node.attributes]){
-        const name = attr.name.toLowerCase();
-        const value = attr.value.trim();
-        if (name.startsWith('on')) node.removeAttribute(attr.name);
-        if ((name === 'href' || name.endsWith(':href')) &&
-            !value.startsWith('#') && !value.startsWith('data:')){
-          node.removeAttribute(attr.name);
-        }
-      }
-    });
-
-    const cleanSvg = new XMLSerializer().serializeToString(root);
-    const blob = new Blob([cleanSvg], { type:'image/svg+xml;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-
-    try {
-      const img = await loadSvgImage(url);
-      const result = importSvgAsSelectableBody(img, file.name);
-      svgStatus.textContent =
-        `Imported ${file.name} · selectable · ${result.solidPixels.toLocaleString()} solid pixels`;
-    } finally {
-      URL.revokeObjectURL(url);
-    }
-  } catch (error){
-    console.error(error);
-    svgStatus.textContent = 'Import failed';
-    alert(`SVG import failed: ${error.message}`);
-  }
-});
-
-function loadSvgImage(url){
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error('The browser could not render the SVG.'));
-    img.src = url;
-  });
-}
-
-function importSvgAsSelectableBody(img, name){
-  const sourceWidth = Math.max(1, Math.round(img.naturalWidth || img.width || 1024));
-  const sourceHeight = Math.max(1, Math.round(img.naturalHeight || img.height || 512));
-
-  const maxRaster = 2048;
-  const rasterScale = Math.min(1, maxRaster / Math.max(sourceWidth, sourceHeight));
-  const rw = Math.max(1, Math.round(sourceWidth * rasterScale));
-  const rh = Math.max(1, Math.round(sourceHeight * rasterScale));
-
-  const temp = document.createElement('canvas');
-  temp.width = rw;
-  temp.height = rh;
-  const tctx = temp.getContext('2d', { willReadFrequently:true });
-  tctx.clearRect(0, 0, rw, rh);
-  tctx.drawImage(img, 0, 0, rw, rh);
-
-  const image = tctx.getImageData(0, 0, rw, rh);
-  const data = image.data;
-  let minX = rw, minY = rh, maxX = -1, maxY = -1, solidPixels = 0;
-
-  for (let y = 0; y < rh; y++){
-    for (let x = 0; x < rw; x++){
-      const i = (y * rw + x) * 4;
-      if (data[i + 3] > 8){
-        minX = Math.min(minX, x); maxX = Math.max(maxX, x);
-        minY = Math.min(minY, y); maxY = Math.max(maxY, y);
-        solidPixels++;
-        data[i] = 255; data[i + 1] = 255; data[i + 2] = 255; data[i + 3] = 255;
-      } else {
-        data[i] = 0; data[i + 1] = 0; data[i + 2] = 0; data[i + 3] = 0;
-      }
-    }
-  }
-
-  if (solidPixels === 0)
-    throw new Error('The SVG rendered with no visible opaque pixels. Check its fill, stroke, and opacity.');
-
-  tctx.putImageData(image, 0, 0);
-
-  const cropW = maxX - minX + 1;
-  const cropH = maxY - minY + 1;
-  const mask = document.createElement('canvas');
-  mask.width = cropW;
-  mask.height = cropH;
-  const mctx = mask.getContext('2d', { willReadFrequently:true });
-  mctx.clearRect(0, 0, cropW, cropH);
-  mctx.drawImage(temp, minX, minY, cropW, cropH, 0, 0, cropW, cropH);
-
-  const cropped = mctx.getImageData(0, 0, cropW, cropH);
-  const alpha = new Uint8Array(cropW * cropH);
-  for (let i = 0, p = 0; i < cropped.data.length; i += 4, p++)
-    alpha[p] = cropped.data[i + 3];
-
-  const aspect = cropH / cropW;
-  const initialScale = Math.min(
-    W * 0.60 / 2,
-    H * 0.55 / (2 * aspect)
-  );
-
-  state.shapes.push({
-    id: state.nextId++,
-    type: 'bitmap',
-    name,
-    maskCanvas: mask,
-    maskDataUrl: mask.toDataURL('image/png'),
-    maskAlpha: alpha,
-    maskW: cropW,
-    maskH: cropH,
-    aspect,
-    x: W * 0.5,
-    y: H * 0.5,
-    s: initialScale,
-    rot: 0,
-    flip: false,
-  });
-
-  state.sel = state.shapes.length - 1;
-  setTool('select');
-  obsDirty = true;
-  rasterizeObstacles();
-  obsDirty = false;
-  draw();
-  drawOverlay();
-  stage.focus({ preventScroll:true });
-
-  return { solidPixels };
-}
-
-function flipSelected(){
-  const s = state.shapes[state.sel];
-  if (!s) return;
-  s.flip = !s.flip;
-  obsDirty = true;
-  drawOverlay();
-}
-$('flipBtn').onclick = flipSelected;
-$('delBtn').onclick    = deleteSelected;
-$('rotL').onclick = () => { const s = state.shapes[state.sel]; if (s){ s.rot -= Math.PI/36; obsDirty = true; drawOverlay(); } };
-$('rotR').onclick = () => { const s = state.shapes[state.sel]; if (s){ s.rot += Math.PI/36; obsDirty = true; drawOverlay(); } };
-$('scUp').onclick   = () => { const s = state.shapes[state.sel]; if (s){ s.s = Math.min(110, s.s*1.1); obsDirty = true; drawOverlay(); } };
-$('scDown').onclick = () => { const s = state.shapes[state.sel]; if (s){ s.s = Math.max(4, s.s/1.1); obsDirty = true; drawOverlay(); } };
-
-const speedEl = $('speed');
-const MPH_MAX = 150, U_MAX = 0.17;   // slider top = 150 mph = lattice Ma ≈ 0.29
-function applySpeed(){
-  const v = +speedEl.value;
-  const mph = Math.round(v / 100 * MPH_MAX);
-  state.U = U_MAX * v / 100;
-  $('speedOut').textContent = `${mph} mph · U=${state.U.toFixed(3)}`;
-  speedEl.setAttribute('aria-valuetext',
-    `${mph} miles per hour, lattice velocity ${state.U.toFixed(3)}`);
-}
-speedEl.addEventListener('input', applySpeed);
-applySpeed();
-
-$('brush').addEventListener('input', e => {
-  state.brush = +e.target.value;
-  $('brushOut').textContent = `${state.brush} px`;
-});
-
-document.querySelectorAll('input[name="viz"]').forEach(r =>
-  r.addEventListener('change', e => { state.mode = +e.target.value; }));
-
-$('floorChk').addEventListener('change', e => {
-  state.floor = e.target.checked;
-  obsDirty = true;
-});
-
-const pauseBtn = $('pauseBtn');
-function setPaused(p){
-  state.paused = p;
-  pauseBtn.textContent = p ? 'Run' : 'Pause';
-  pauseBtn.setAttribute('aria-pressed', String(p));
-}
-pauseBtn.onclick = () => setPaused(!state.paused);
-
-$('resetBtn').onclick = () => { if (glOk) initFluid(); };
-$('clearBtn').onclick = () => {
-  state.shapes = [];
-  state.sel = -1;
-  paintCtx.clearRect(0, 0, W, H);
-  obsDirty = true;
-  drawOverlay();
-};
-
-
-/* ============================== persistent state ============================== */
-const STORAGE_KEY = 'section-tunnel-state-v2';
-const stateStatus = $('stateStatus');
-let restoringState = false;
-
-function setStateStatus(message){
-  if (stateStatus) stateStatus.textContent = message;
-}
-
-function canvasToDataUrl(canvas){
-  return canvas.toDataURL('image/png');
-}
-
-function resolutionKeyForCurrentLattice(){
-  for (const [key, r] of Object.entries(RES))
-    if (r.w === W && r.h === H) return key;
-  return 'standard';
-}
-
-function serializeShape(sh){
-  const saved = {
-    id: sh.id,
-    type: sh.type,
-    foil: sh.foil || null,
-    name: sh.name || null,
-    x: sh.x,
-    y: sh.y,
-    s: sh.s,
-    rot: sh.rot,
-    flip: Boolean(sh.flip),
-  };
-  if (sh.type === 'bitmap'){
-    saved.maskDataUrl = sh.maskDataUrl || canvasToDataUrl(sh.maskCanvas);
-    saved.maskW = sh.maskW;
-    saved.maskH = sh.maskH;
-    saved.aspect = sh.aspect;
-  }
-  return saved;
-}
-
-function saveTunnelState({ silent=false } = {}){
-  if (restoringState) return false;
-  try {
-    const selected = state.shapes[state.sel];
-    const payload = {
-      version: 2,
-      resolution: resolutionKeyForCurrentLattice(),
-      detailChoice: $('detailSel').value,
-      speed: Number($('speed').value),
-      mode: state.mode,
-      floor: state.floor,
-      paused: state.paused,
-      brush: state.brush,
-      tool: state.tool,
-      nextId: state.nextId,
-      selectedShapeId: selected ? selected.id : null,
-      shapes: state.shapes.map(serializeShape),
-      paintDataUrl: canvasToDataUrl(paintCanvas),
-      savedAt: new Date().toISOString(),
-    };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-    if (!silent) setStateStatus('State saved');
-    return true;
-  } catch (error){
-    console.error('State save failed:', error);
-    if (!silent){
-      setStateStatus('Save failed');
-      alert(`Could not save state: ${error.message}`);
-    }
-    return false;
-  }
-}
-
-
-function loadImage(dataUrl){
-  return new Promise((resolve, reject) => {
-    const image = new Image();
-    image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error('A saved image could not be restored.'));
-    image.src = dataUrl;
-  });
-}
-
-async function restoreBitmapShape(saved){
-  if (!saved.maskDataUrl) throw new Error(`Saved bitmap ${saved.name || saved.id} has no image data.`);
-  const image = await loadImage(saved.maskDataUrl);
-  const mask = document.createElement('canvas');
-  mask.width = saved.maskW || image.naturalWidth || image.width;
-  mask.height = saved.maskH || image.naturalHeight || image.height;
-  const ctx = mask.getContext('2d', { willReadFrequently:true });
-  ctx.clearRect(0, 0, mask.width, mask.height);
-  ctx.drawImage(image, 0, 0, mask.width, mask.height);
-  const pixels = ctx.getImageData(0, 0, mask.width, mask.height).data;
-  const alpha = new Uint8Array(mask.width * mask.height);
-  for (let i = 3, p = 0; i < pixels.length; i += 4, p++) alpha[p] = pixels[i];
-  return {
-    id: saved.id,
-    type: 'bitmap',
-    name: saved.name || 'Imported SVG',
-    maskCanvas: mask,
-    maskDataUrl: saved.maskDataUrl,
-    maskAlpha: alpha,
-    maskW: mask.width,
-    maskH: mask.height,
-    aspect: Number.isFinite(saved.aspect) ? saved.aspect : mask.height / Math.max(mask.width, 1),
-    x: saved.x,
-    y: saved.y,
-    s: saved.s,
-    rot: saved.rot || 0,
-    flip: Boolean(saved.flip),
-  };
-}
-
-function restoreOrdinaryShape(saved){
-  return {
-    id: saved.id,
-    type: saved.type,
-    foil: saved.foil || 'n0016',
-    x: saved.x,
-    y: saved.y,
-    s: saved.s,
-    rot: saved.rot || 0,
-    flip: Boolean(saved.flip),
-  };
-}
-
-async function restorePaint(dataUrl){
-  paintCtx.setTransform(1, 0, 0, 1, 0, 0);
-  paintCtx.clearRect(0, 0, W, H);
-  if (!dataUrl) return;
-  const image = await loadImage(dataUrl);
-  paintCtx.drawImage(image, 0, 0, W, H);
-}
-
-async function loadTunnelState({ silent=false } = {}){
-  const text = localStorage.getItem(STORAGE_KEY);
-  if (!text){
-    if (!silent) setStateStatus('No saved state');
-    return false;
-  }
-  restoringState = true;
-  try {
-    const saved = JSON.parse(text);
-    if (saved.version !== 2) throw new Error(`Unsupported saved-state version ${saved.version}.`);
-
-    const resolution = RES[saved.resolution] ? saved.resolution : 'standard';
-    if (RES[resolution].w !== W) setResolution(resolution);
-    $('detailSel').value = saved.detailChoice === 'auto' ? 'auto' : resolution;
-
-    $('speed').value = String(Number.isFinite(saved.speed) ? saved.speed : 45);
-    applySpeed();
-
-    state.mode = [0,1,2,3].includes(saved.mode) ? saved.mode : 0;
-    const modeRadio = document.querySelector(`input[name="viz"][value="${state.mode}"]`);
-    if (modeRadio) modeRadio.checked = true;
-
-    state.floor = Boolean(saved.floor);
-    $('floorChk').checked = state.floor;
-    state.brush = Number.isFinite(saved.brush) ? saved.brush : 5;
-    $('brush').value = String(state.brush);
-    $('brushOut').textContent = `${state.brush} px`;
-    setTool(['select','draw','erase'].includes(saved.tool) ? saved.tool : 'select');
-
-    const shapes = [];
-    for (const item of saved.shapes || [])
-      shapes.push(item.type === 'bitmap' ? await restoreBitmapShape(item) : restoreOrdinaryShape(item));
-    state.shapes = shapes;
-    state.nextId = Math.max(Number(saved.nextId) || 1, ...shapes.map(sh => sh.id + 1), 1);
-    state.sel = saved.selectedShapeId == null ? -1 : shapes.findIndex(sh => sh.id === saved.selectedShapeId);
-
-    await restorePaint(saved.paintDataUrl);
-    obsDirty = true;
-    rasterizeObstacles();
-    obsDirty = false;
-    initFluid();
-    setPaused(Boolean(saved.paused));
-    draw();
-    drawOverlay();
-    updateMeters();
-    setStateStatus(`Restored ${new Date(saved.savedAt).toLocaleString()}`);
-    return true;
-  } catch (error){
-    console.error('State restore failed:', error);
-    if (!silent){
-      setStateStatus('Restore failed');
-      alert(`Could not restore state: ${error.message}`);
-    }
-    return false;
-  } finally {
-    restoringState = false;
-  }
-}
-
-$('saveStateBtn').addEventListener('click', () => saveTunnelState());
-$('loadStateBtn').addEventListener('click', () => loadTunnelState());
-$('clearStateBtn').addEventListener('click', () => {
-  localStorage.removeItem(STORAGE_KEY);
-  setStateStatus('Saved state cleared');
-});
-
-/* meters */
-const cdVal = $('cdVal'), clVal = $('clVal'), cdFill = $('cdFill'), clFill = $('clFill');
-function updateMeters(){
-  if (!state.metersOk){ cdVal.textContent = 'n/a'; clVal.textContent = 'n/a'; return; }
-  if (state.cd == null){
-    cdVal.textContent = '—'; clVal.textContent = '—';
-    cdFill.style.width = '0'; clFill.style.width = '0';
-    return;
-  }
-  cdVal.textContent = state.cd.toFixed(2);
-  clVal.textContent = (state.cl >= 0 ? '+' : '') + state.cl.toFixed(2);
-  cdFill.style.width = `${Math.min(Math.abs(state.cd) / 4, 1) * 100}%`;
-  const half = Math.min(Math.abs(state.cl) / 2.5, 1) * 50;
-  clFill.style.width = `${half}%`;
-  clFill.classList.toggle('neg', state.cl < 0);
-  clFill.style.left = state.cl < 0 ? `${50 - half}%` : '50%';
-}
-
-/* ============================== sizing & main loop ============================== */
-function resize(){
-  const r = stage.getBoundingClientRect();
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  glCanvas.width = Math.max(2, Math.round(r.width * dpr));
-  glCanvas.height = Math.max(2, Math.round(r.height * dpr));
-  drawOverlay();
-}
-new ResizeObserver(resize).observe(stage);
-
-let frame = 0;
-function loop(){
-  if (glOk){
-    if (obsDirty){ rasterizeObstacles(); obsDirty = false; }
-    if (!state.paused){
-      stepFluid();
-      stepDye();
-      if (frame % FORCE_EVERY === 0){
-        measureForces();
-        updateMeters();
-        drawOverlay();
-      }
-    }
-    draw();
-    frame++;
-  }
-  requestAnimationFrame(loop);
-}
-
-const detailSel = $('detailSel');
-detailSel.addEventListener('change', () => {
-  if (!glOk) return;
-  const v = detailSel.value;
-  setResolution(v === 'auto' ? benchAuto : v);
-});
-
-let benchAuto = 'standard';
-(async () => {
-if (glOk){
-  try {
-    buildPrograms();
-    allocSim();
-    resize();
-    rasterizeObstacles();
-    obsDirty = false;
-    initFluid();
-    benchAuto = benchmarkPick();
-    if (benchAuto !== 'standard') setResolution(benchAuto);
-    detailSel.options[0].textContent = `Auto (${RES[benchAuto].label})`;
-    $('latticeLabel').textContent = `${W}×${H} lattice`;
-    const restored = await loadTunnelState({ silent:true });
-    if (!restored){
-      addShape('circle');            // starter body
-      state.sel = -1;
-      drawOverlay();
-      if (matchMedia('(prefers-reduced-motion: reduce)').matches) setPaused(true);
-    }
-  } catch (err){
-    glOk = false;
-    $('glError').textContent = 'GPU setup failed: ' + err.message;
-    $('glError').style.display = 'grid';
-  }
-}
-requestAnimationFrame(loop);
-})();
-</script>
-</body>
-</html>
+# Section Tunnel
+
+**Section Tunnel** is a self-contained browser application for qualitative, two-dimensional aerodynamic shape comparison. It uses a GPU-accelerated D2Q9 lattice-Boltzmann fluid solver implemented with WebGL2. The interface was cribbed largely from [Ian Pitts](https://www.facebook.com/groups/36770865782497612/user/1357050131). Other input was from [Ov3rlord](https://www.chiefdelphi.com/t/i-built-a-browser-based-wind-tunnel-cfd-using-claude-and-my-knowledge/522504) and [AlexPetrusca](https://github.com/AlexPetrusca/Wind-Tunnel/tree/master).
+
+The application can display smoke, local speed, pressure and vorticity; estimate relative lift and drag coefficients; create built-in bodies; import selectable SVG silhouettes; and manually save the tunnel configuration in browser storage.
+
+> This is an educational and comparative flow-visualization tool. It is not validated engineering CFD, and its displayed force coefficients should not be treated as absolute real-world aerodynamic data.
+
+---
+
+![Section Tunnel example showing the imported outline and generated flow](extreme_res.png)
+
+## Files
+
+The application is contained in one HTML file:
+
+```text
+wind-tunnel-stateful-manual-save.html
+```
+
+No separate JavaScript file, stylesheet, web server, package manager, or external library is required.
+
+Open the HTML file directly in a modern browser.
+
+Recommended browsers:
+
+- Google Chrome
+- Microsoft Edge >=v109.* on Win7 or later
+- Mozilla Firefox >=115.* (Win7 will show "WebGL2 with float render targets is required for this demo and is not available in this browser.")
+- Brave >=v1.48.* works
+
+The browser and GPU must support:
+
+- WebGL2
+- Floating-point render targets
+- The `EXT_color_buffer_float` WebGL extension
+
+If those features are unavailable, the page displays a WebGL compatibility error instead of starting the simulation.
+
+---
+
+## Starting the application
+
+1. Double-click `wind-tunnel.html`.
+2. Allow the browser a moment to compile the GPU shaders and benchmark the available graphics hardware.
+3. The simulation starts with flow moving from right to left.
+
+The arrow at the top of the page indicates the flow direction:
+
+```text
+◀ FLOW
+```
+
+The right edge is the inlet. The left edge is the outlet.
+
+At startup, the application checks browser `localStorage` for a previously saved state.
+
+- If a saved state exists, it is restored automatically.
+- If no saved state exists, a cylinder is added as the starter body.
+- The application does **not** automatically save changes.
+- State is written only when **Save state** is clicked.
+
+The live fluid and smoke field are not restored. After loading a state, the flow restarts and develops around the restored geometry.
+
+---
+
+# Example: compare a car profile with and without a ground plane
+
+This example demonstrates a normal test workflow.
+
+1. Open the application.
+2. Click **Clear bodies** to remove the starter cylinder.
+3. Under **Bodies**, choose an SVG side-profile file with **Import SVG**.
+4. Click the imported body in the tunnel to select it.
+5. Drag the body toward the lower part of the tunnel.
+6. Use the square handle to resize it.
+7. Use the round handle, or the rotation buttons, to level the body.
+8. Select **smoke** and allow the wake to develop.
+9. Select **speed** to inspect accelerated and stagnant regions.
+10. Select **vorticity** to inspect separated shear layers and wake rotation.
+11. Observe the relative drag and lift readings.
+12. Enable **ground plane**.
+13. Click **Reset flow** and allow the new flow field to develop.
+14. Compare the wake, lift, and drag values with the earlier case.
+15. Click **Save state** to store the current configuration manually.
+
+For a meaningful comparison, change only one variable at a time and allow the displayed coefficients to settle before recording them.
+
+---
+
+# Tunnel display
+
+## Test section
+
+The large central panel is the simulated wind-tunnel test section.
+
+It contains two overlaid canvases:
+
+- A WebGL canvas for the fluid visualization
+- A 2D canvas for selection handles, force arrows, and body controls
+
+Flow enters from the right and travels toward the left.
+
+## Drag meter
+
+The **DRAG Cd** meter displays a relative drag coefficient based on momentum exchange between the fluid and the combined obstacle field.
+
+The amber horizontal force arrow points in the drag direction.
+
+## Lift meter
+
+The **LIFT Cl** meter displays a relative lift coefficient.
+
+- Positive lift is shown on the positive side of the meter.
+- Negative lift or downforce is shown on the negative side.
+- The cyan force arrow indicates the lift direction.
+
+The coefficients are normalized using lattice freestream velocity and the combined obstacle frontal height. They are intended for relative comparisons within the application.
+
+---
+
+# Tunnel controls
+
+## Speed
+
+The **Speed** slider changes the inlet flow velocity.
+
+The control ranges from zero to a displayed maximum of approximately 150 mph. The mph value is a presentation scale derived from the lattice velocity; it does not establish a full real-world Reynolds-number match.
+
+Changing speed does not instantly rebuild the existing flow field. The simulation transitions toward the new inlet condition.
+
+Use **Reset flow** after changing speed when you want a clean test at the new setting.
+
+---
+
+## Smoke
+
+Select **smoke** to display an advected tracer field.
+
+The tracer is injected in horizontal bands near the right-hand inlet and transported by the simulated velocity field.
+
+Use this mode to examine:
+
+- Stream paths
+- Wake shape
+- Flow separation
+- Recirculation
+- Interaction between multiple bodies
+
+The smoke is a passive visualization tracer rather than a physical particulate model.
+
+---
+
+## Speed visualization
+
+Select **speed** to display local velocity magnitude.
+
+Typical interpretation:
+
+- Dark regions: low-speed or stagnant flow
+- Blue and cyan: moderate speed
+- Amber and pale regions: higher speed
+
+The color scale is normalized relative to the selected inlet velocity.
+
+Use this mode to identify:
+
+- Accelerated flow over a body
+- Low-speed wakes
+- Stagnation zones
+- Restricted passages
+- Ground-clearance effects
+
+---
+
+## Vorticity visualization
+
+Select **vorticity** to display local two-dimensional rotational flow.
+
+The application estimates vorticity from neighboring velocity cells.
+
+- Warm colors indicate rotation in one direction.
+- Cool colors indicate rotation in the opposite direction.
+- The neutral background indicates weak local rotation.
+
+Use this mode to identify:
+
+- Separated shear layers
+- Alternating wake vortices
+- Recirculation
+- Strong rotational regions near body edges
+
+
+## Pressure visualization
+
+Select **pressure** to display relative lattice pressure.
+
+In the isothermal D2Q9 lattice-Boltzmann model, pressure is proportional to density:
+
+```text
+p = ρ / 3
+```
+
+The display uses density deviation from the freestream value:
+
+- Blue: lower relative pressure
+- Pale neutral: approximately freestream pressure
+- Orange/red: higher relative pressure
+
+The scale changes with inlet velocity squared so that the view remains useful across speed settings. It is a relative lattice-pressure visualization, not a calibrated pressure measurement in pascals.
+
+Use this mode to identify:
+
+- High-pressure stagnation regions
+- Low-pressure accelerated flow
+- Pressure differences across a foil
+- Pressure recovery behind a body
+- Underbody and ground-clearance pressure changes
+
+
+---
+
+## Ground plane
+
+Enable **ground plane** to add a stationary solid strip along the bottom of the lattice.
+
+The ground plane affects the flow but is excluded from the reported body-force summation.
+
+Use it to compare:
+
+- Free-air versus near-ground behavior
+- Vehicle underbody flow
+- Ground clearance
+- Wing or diffuser proximity effects
+
+After toggling the ground plane, use **Reset flow** for a clean comparison.
+
+---
+
+## Detail
+
+The **Detail** selector controls lattice resolution.
+
+| Setting | Lattice size |
+|---|---:|
+| Auto | Chosen by startup GPU benchmark |
+| Low | 384 × 192 |
+| Standard | 512 × 256 |
+| High | 768 × 384 |
+| Ultra | 1024 × 512 |
+
+Higher resolutions produce finer obstacle rasterization and flow detail but require substantially more GPU processing and memory.
+
+Changing resolution:
+
+- Reallocates the simulation textures
+- Rescales existing bodies
+- Rescales freehand drawing
+- Restarts the fluid field
+
+**Auto** runs a startup benchmark and selects the largest tested setting expected to fit the application's simulation-time target.
+
+---
+
+## Pause / Run
+
+Click **Pause** to stop fluid updates.
+
+While paused:
+
+- The current visualization remains displayed.
+- Bodies may still be selected and repositioned.
+- Controls remain available.
+- The fluid and smoke fields do not advance.
+
+The button changes to **Run**. Click it again to resume simulation.
+
+The pause/run state is included in a manually saved configuration.
+
+---
+
+## Reset flow
+
+Click **Reset flow** to reinitialize:
+
+- Fluid density
+- Fluid velocity
+- Smoke tracer
+- Lift estimate
+- Drag estimate
+
+It preserves:
+
+- Bodies
+- Imported SVG shapes
+- Freehand obstacles
+- Body position and scale
+- Ground-plane setting
+- Speed and display settings
+
+Use this after making a geometry, speed, or ground-plane change when you want the new case to begin from a uniform freestream.
+
+---
+
+## Clear bodies
+
+Click **Clear bodies** to remove:
+
+- All built-in bodies
+- All imported SVG bodies
+- All freehand drawing
+
+The fluid field continues running around the now-empty tunnel unless separately reset.
+
+This action does not delete the manually saved state in browser storage.
+
+---
+
+# Manual state controls
+
+## Save state
+
+Click **Save state** to write the current configuration to browser `localStorage`.
+
+The saved data includes:
+
+- Lattice/detail setting
+- Speed
+- Visualization mode
+- Ground plane
+- Pause/run state
+- Brush size
+- Selected tool
+- Built-in bodies
+- Imported SVG body masks
+- Body positions
+- Body scales
+- Body rotations
+- Body flip states
+- Selected body
+- Freehand obstacle bitmap
+
+There is no automatic five-second save, save-on-change, or save-on-exit.
+
+Saving again replaces the earlier saved state for this application and browser origin.
+
+## Load state
+
+Click **Load state** to restore the most recently saved configuration.
+
+Loading reconstructs all saved bodies and freehand geometry, resets the fluid field, and then restores the saved pause/run condition.
+
+The live GPU velocity, density, smoke, and force textures are not serialized. Therefore, the flow wake starts over after loading.
+
+## Clear saved state
+
+Click **Clear saved state** to delete the stored configuration from browser `localStorage`.
+
+This does not alter the currently running tunnel. It only removes the saved copy.
+
+After clearing the saved state, reloading the page starts with the default cylinder unless another state is saved first.
+
+## Browser-storage scope
+
+A saved state belongs to the browser storage origin used to open the file.
+
+For a local file, browser behavior can vary by browser and profile. A saved state may not be shared between:
+
+- Different browsers
+- Normal and private/incognito windows
+- Different browser profiles
+- A local `file:` URL and a hosted `https:` URL
+- Different copies or locations of the HTML file
+
+---
+
+# Tool controls
+
+## Select
+
+Choose **Select** to work with built-in and imported SVG bodies.
+
+With a body selected:
+
+- Drag the body to move it.
+- Drag the square handle to scale it.
+- Drag the round handle to rotate it.
+- Use the body-control buttons for flip, rotation, size, and deletion.
+
+Click empty tunnel space to clear the current selection.
+
+Freehand drawing is not a selectable body.
+
+## Draw
+
+Choose **Draw**, then click and drag in the tunnel to paint an arbitrary solid obstacle.
+
+The painted region becomes part of the obstacle bitmap used by the fluid solver.
+
+Use Draw for:
+
+- Quick shape experiments
+- Walls and barriers
+- Small appendages
+- Rough profile changes
+- Flow restrictions
+
+Drawn geometry is saved as part of the manually saved state.
+
+## Erase
+
+Choose **Erase**, then drag over freehand geometry to remove it.
+
+Erase affects only freehand obstacle ink. It does not erase:
+
+- Built-in bodies
+- Imported SVG bodies
+- The ground plane
+
+Use **Delete selected** to remove a selectable body.
+
+## Brush
+
+The **Brush** slider controls the Draw and Erase radius.
+
+The brush size is scaled with lattice density so its apparent role remains reasonably consistent when resolution changes.
+
+A smaller brush is useful for fine corrections. A larger brush is useful for quickly creating or removing large regions.
+
+---
+
+# Body controls
+
+## Cylinder
+
+Click **+ Cylinder** to add a circular body.
+
+A cylinder is useful for observing:
+
+- Symmetric wake development
+- Vortex shedding
+- Drag from a bluff body
+- Ground-plane interaction
+
+## Box
+
+Click **+ Box** to add a rectangular body.
+
+Use it to examine sharp-edge separation and broad bluff-body wakes.
+
+## Wedge
+
+Click **+ Wedge** to add a triangular wedge.
+
+Use it to compare a tapered profile with a box or cylinder.
+
+## Plate
+
+Click **+ Plate** to add a thin rectangular plate.
+
+Rotate the plate to study incidence, separation, lift, and drag.
+
+At very small thicknesses, lattice resolution strongly influences the rendered obstacle.
+
+## Car body
+
+Click **+ Car body** to add the built-in fastback-style side silhouette.
+
+The built-in body is a polygon defined in the JavaScript source and behaves as a selectable object.
+
+## Foil selector
+
+The **Foil** list selects an airfoil profile.
+
+Available profiles in the current build include:
+
+- NACA 0016 — symmetric
+- NACA 0030 — thick fairing or strut
+- NACA 2412 — mild camber
+- NACA 4412 — greater camber
+- NACA 9412 — high camber
+- Race wing — custom maximum-camber profile
+
+Select a profile, then click **+ Add foil**.
+
+The profile leading edge faces the incoming flow from the right.
+
+## Import SVG
+
+Use **Import SVG** to add a custom silhouette as a selectable body.
+
+Recommended SVG preparation:
+
+- Save as Plain SVG.
+- Use a filled silhouette.
+- Use a transparent background.
+- Remove any page-sized white rectangle.
+- Remove the source bitmap after tracing.
+- Convert objects to paths where practical.
+- Keep only the intended visible silhouette.
+- Avoid external images, scripts, filters, and linked resources.
+- Point the vehicle nose or body leading edge toward the right.
+
+The importer:
+
+1. Reads the selected SVG.
+2. Renders it to a temporary canvas.
+3. Detects the visible opaque bounds.
+4. Crops unused page area.
+5. Converts the visible result into an obstacle mask.
+6. Creates a selectable bitmap body.
+7. Centers it in the tunnel.
+
+After import, use Select to move, scale, rotate, flip, or delete it.
+
+The imported mask, not the original SVG XML, is stored in a saved state.
+
+---
+
+## Flip
+
+Click **Flip ⇅** to mirror the selected body vertically.
+
+For a cambered foil, this can change lift into downforce or vice versa.
+
+For an asymmetric imported body, it produces a vertical mirror image.
+
+## Rotate left
+
+Click **⟲ 5°** to rotate the selected body by 5 degrees in one direction.
+
+## Rotate right
+
+Click **⟳ 5°** to rotate the selected body by 5 degrees in the opposite direction.
+
+## Decrease size
+
+Click **− size** to reduce the selected body's scale by approximately 10 percent.
+
+## Increase size
+
+Click **+ size** to increase the selected body's scale by approximately 10 percent.
+
+## Delete selected
+
+Click **Delete selected** to remove the currently selected built-in or imported SVG body.
+
+It does not remove freehand drawing. Use Erase or Clear bodies for freehand geometry.
+
+---
+
+# Mouse, touch, and keyboard controls
+
+## Mouse
+
+With Select active:
+
+- Click a body to select it.
+- Drag the selected body to move it.
+- Drag the square handle to scale it.
+- Drag the round handle to rotate it.
+- Click empty space to deselect.
+
+## Touch
+
+With a body selected:
+
+- Drag with one finger to move it.
+- Pinch with two fingers to scale it.
+- Twist two fingers to rotate it.
+
+## Keyboard
+
+The tunnel panel must have focus. Click it once before using keyboard commands.
+
+| Key | Action |
+|---|---|
+| Left arrow | Move selected body left |
+| Right arrow | Move selected body right |
+| Up arrow | Move selected body up |
+| Down arrow | Move selected body down |
+| Shift + arrow | Move by a larger increment |
+| `r` | Rotate by 5 degrees |
+| `R` or Shift + `r` | Rotate by −5 degrees |
+| `f` | Flip vertically |
+| `+` or `=` | Increase size |
+| `-` or `_` | Decrease size |
+| Delete | Delete selected body |
+| Backspace | Delete selected body |
+
+---
+
+# Recommended test procedure
+
+For more repeatable comparisons:
+
+1. Select one resolution and keep it unchanged across cases.
+2. Select one speed and keep it unchanged.
+3. Add or import the first body.
+4. Position and size it.
+5. Click **Reset flow**.
+6. Allow the flow and coefficients to settle.
+7. Record drag, lift, and qualitative wake observations.
+8. Change only one geometric variable.
+9. Click **Reset flow** again.
+10. Allow the second case to settle.
+11. Compare the results.
+
+Examples of single-variable comparisons:
+
+- Same car body with two ride heights
+- Same foil at two angles
+- Same body with and without ground plane
+- Box versus wedge at equal frontal height
+- Original SVG versus a streamlined revision
+
+Because this is a transient solver, readings taken immediately after a change are not representative of a settled case.
+
+---
+
+# Interpretation and limitations
+
+The application is most useful for qualitative comparisons.
+
+Important limitations include:
+
+- The simulation is two-dimensional.
+- The lattice resolution is modest.
+- Reynolds number is lattice-limited.
+- The displayed mph scale is not a complete physical scaling model.
+- Boundary conditions are simplified.
+- Imported geometry is rasterized.
+- Thin or small features may disappear or change shape on the lattice.
+- Force coefficients use frontal height rather than a complete three-dimensional reference area.
+- Multiple bodies are treated as one combined obstacle field for force reporting.
+- The ground plane is excluded from the force summation.
+- Numerical behavior can vary with speed, resolution, body size, and proximity to boundaries.
+
+Use the results to compare configurations under identical settings, not to predict certified real-world aerodynamic coefficients.
+
+---
+
+# Flow generation algorithm
+
+## Overview
+
+The simulation uses a **two-dimensional, nine-velocity lattice-Boltzmann method**, commonly called **D2Q9 LBM**.
+
+Instead of directly solving the macroscopic Navier-Stokes equations at every cell, LBM evolves nine particle-distribution values per lattice cell.
+
+The nine directions are:
+
+- One stationary population
+- Four axial populations
+- Four diagonal populations
+
+From those distributions, the solver reconstructs local fluid density and velocity.
+
+The main GPU pipeline is:
+
+```text
+Rasterize obstacles
+        ↓
+Initialize or retain particle distributions
+        ↓
+Stream distributions from neighboring cells
+        ↓
+Apply solid-boundary bounce-back
+        ↓
+Recover density and velocity
+        ↓
+Relax distributions toward equilibrium
+        ↓
+Apply sub-grid stabilization
+        ↓
+Advect smoke tracer
+        ↓
+Calculate momentum-exchange forces
+        ↓
+Render smoke, speed, or vorticity
+```
+
+## GPU implementation
+
+The solver runs in WebGL2 fragment shaders.
+
+Fluid data is stored in floating-point textures. Because WebGL render targets cannot generally be read from and written to simultaneously, the solver uses paired texture sets in a ping-pong arrangement:
+
+1. Read the current distributions.
+2. Write the next distributions to the alternate framebuffer.
+3. Swap source and destination.
+4. Repeat for the configured number of substeps.
+
+At Standard resolution, the application normally performs approximately ten LBM steps per displayed animation frame. The number of substeps scales upward with lattice width.
+
+## Equilibrium distribution
+
+For each D2Q9 direction, the code calculates an equilibrium particle distribution from:
+
+- Direction weight
+- Local density
+- Local velocity
+- Direction-to-velocity dot product
+
+The equilibrium expression is the standard low-Mach D2Q9 polynomial approximation.
+
+The initialized freestream velocity points in the negative X direction, which produces right-to-left flow.
+
+## Streaming
+
+During streaming, each cell gathers particle populations from neighboring lattice cells in their corresponding directions.
+
+This implementation uses a pull-streaming scheme:
+
+- Each destination cell reads the population that originated at the upstream neighboring cell.
+- If that neighboring cell is solid, bounce-back is applied instead.
+
+## Collision and relaxation
+
+After streaming, the solver calculates local density and velocity and relaxes the distributions toward equilibrium.
+
+The base relaxation time is:
+
+```text
+TAU0 = 0.53
+```
+
+The relaxation rate determines effective lattice viscosity and numerical behavior.
+
+Velocity magnitude is limited internally to reduce instability at excessive local speeds.
+
+## Smagorinsky sub-grid stabilization
+
+The collision shader estimates non-equilibrium stress components and uses them to increase the local effective relaxation time.
+
+This is a Smagorinsky-style sub-grid model intended to stabilize under-resolved flow structures and provide additional effective dissipation where the local non-equilibrium stress is large.
+
+It does not make the simulation equivalent to a high-resolution engineering turbulence model, but it improves robustness for interactive use.
+
+## Solid obstacles
+
+Built-in bodies, imported SVG masks, freehand drawing, and the optional ground plane are rasterized into one obstacle texture.
+
+For fluid links that encounter a solid cell, the solver uses halfway bounce-back:
+
+- The incoming particle population is reflected into its opposite lattice direction.
+- The reflected momentum produces a no-slip-style stationary boundary approximation.
+
+The accuracy of the body boundary depends on lattice resolution because all geometry ultimately becomes a pixel mask.
+
+## Inlet and outlet
+
+The boundary treatment is simplified:
+
+- The right edge is forced to the selected freestream velocity.
+- The top and bottom boundaries are also maintained at freestream conditions unless occupied by the ground plane.
+- The left edge copies values from an adjacent interior column as an approximate outlet.
+
+These conditions support an interactive test section but are not equivalent to a carefully validated external-flow CFD domain.
+
+## Smoke generation
+
+Smoke is implemented as a passive scalar dye field.
+
+Horizontal tracer bands are injected near the right-hand inlet. Each frame, the dye shader traces backward along the local velocity field and samples the previous dye texture.
+
+The tracer also decays slightly over time.
+
+The smoke does not affect the fluid solution. It only visualizes the computed velocity field.
+
+## Speed display
+
+The speed view calculates the magnitude of the local velocity vector and maps it to a multicolor gradient normalized by inlet speed.
+
+## Vorticity display
+
+The vorticity view estimates the scalar two-dimensional curl:
+
+```text
+∂v/∂x − ∂u/∂y
+```
+
+It uses centered differences from neighboring lattice velocity cells.
+
+Positive and negative rotation are mapped to different colors.
+
+## Force calculation
+
+Lift and drag are estimated by momentum exchange at fluid-solid interfaces.
+
+For every fluid cell adjacent to a solid cell, the force shader accumulates the momentum reflected by bounce-back.
+
+The full force texture is then reduced repeatedly on the GPU:
+
+```text
+full lattice
+→ half width and height
+→ half again
+→ ...
+→ one pixel
+```
+
+The final one-pixel force total is read back to JavaScript.
+
+The code converts this force into relative coefficients using:
+
+```text
+q = 0.5 × U² × frontal height
+```
+
+and approximately:
+
+```text
+Cd = -Fx / q
+Cl =  Fy / q
+```
+
+The values are low-pass filtered so the meters do not jump abruptly.
+
+Force readback is performed every several display frames rather than every lattice step.
+
+## Why the flow restarts after loading state
+
+Manual state storage saves geometry and user-interface configuration, but not the live GPU textures.
+
+A complete exact fluid-state save would require serializing several large floating-point textures containing:
+
+- Nine distribution populations per cell
+- Density and velocity data
+- Dye data
+- Ping-pong simulation buffers
+
+That would create large saved states, expensive GPU readbacks, and browser-storage limitations.
+
+The current design therefore restores the complete test configuration, initializes a uniform freestream, and allows the flow to redevelop.
+
+---
+
+# Troubleshooting
+
+## The page shows a GPU setup error
+
+Confirm that hardware acceleration is enabled in the browser and try a current version of Chrome, Edge, or Firefox.
+
+The required WebGL extension may be unavailable on older GPUs, remote-desktop sessions, virtual machines, or systems using software rendering.
+
+## An imported SVG does not appear
+
+Check that the SVG contains visible opaque geometry.
+
+Remove:
+
+- Transparent-only paths
+- A missing fill and missing stroke
+- External linked images
+- Unsupported filters
+- Script-generated content
+- Excessive empty page area
+
+Save a simplified copy as Plain SVG.
+
+## The imported body is a large rectangle
+
+The SVG probably contains an opaque page-sized background rectangle.
+
+Delete that rectangle and ensure the page background is transparent.
+
+## The imported shape is too thin
+
+A traced outline may contain only a narrow stroke or hollow ring.
+
+For aerodynamic obstacle use, create a filled silhouette before saving the SVG.
+
+## A body cannot be selected
+
+Confirm that **Select** is active.
+
+Freehand drawing cannot be selected. Imported SVG bodies and built-in bodies can be selected.
+
+## Save state does not follow the file to another browser
+
+The state is stored in browser `localStorage`, not inside the HTML file.
+
+Use the same browser profile and origin, or manually recreate and save the state in the other browser.
+
+## Coefficients fluctuate
+
+The flow may still be transient, the body may be too close to a boundary, or the resolution may be insufficient.
+
+Allow more settling time, use a higher detail setting, or enlarge the tunnel clearance around the body.
+
+---
+
+# License and validation
+
+No formal engineering validation, accuracy guarantee, or certification is implied.
+
+Before distributing the application, add an explicit software license appropriate to the project and verify any third-party source or algorithm attribution requirements.
