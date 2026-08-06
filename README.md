@@ -1,6 +1,6 @@
 # Section Tunnel
 
-**Section Tunnel** is a self-contained browser application for qualitative, two-dimensional aerodynamic shape comparison. It uses a GPU-accelerated D2Q9 lattice-Boltzmann fluid solver implemented with WebGL2.
+**Section Tunnel** is a self-contained browser application for qualitative, two-dimensional aerodynamic shape comparison. It uses a GPU-accelerated D2Q9 lattice-Boltzmann fluid solver implemented with WebGL2. The interface was cribbed largely from [Ian Pitts](https://www.facebook.com/groups/36770865782497612/user/1357050131). Other input was from [Ov3rlord](https://www.chiefdelphi.com/t/i-built-a-browser-based-wind-tunnel-cfd-using-claude-and-my-knowledge/522504) and [AlexPetrusca](https://github.com/AlexPetrusca/Wind-Tunnel/tree/master).
 
 The application can display smoke, local speed, and vorticity; estimate relative lift and drag coefficients; create built-in bodies; import selectable SVG silhouettes; and manually save the tunnel configuration in browser storage.
 
