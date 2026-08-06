@@ -25,8 +25,9 @@ Open the HTML file directly in a modern browser.
 Recommended browsers:
 
 - Google Chrome
-- Microsoft Edge
-- Mozilla Firefox
+- Microsoft Edge v109.* on Win7 or later
+- Mozilla Firefox >115.* (Win7 will show "WebGL2 with float render targets is required for this demo and is not available in this browser.")
+- Brave v1.48.* works
 
 The browser and GPU must support:
 
